@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+# Generated artifacts
+analysis/
+*_ja.pdf
+*_stripped.pdf
+*_overlay.pdf
+*_layout.json
+*_units.json
+*_bilingual.json
+NotoJP*.ttf
+# OS
+.DS_Store
+# Secrets
+.env
