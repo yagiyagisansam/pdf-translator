@@ -85,10 +85,9 @@ def test_residual_english(name):
         for w in WORD_RE.findall(txt):
             if _norm(w) not in blob:
                 leftovers.append((i, w))
-    # Known residue on the paper sample comes from one M1 artifact (the Table 1
-    # caption interleaved with the table title - see docs/IMPROVEMENT_PLAN.md);
-    # the threshold guards against gross removal regressions.
-    assert len(leftovers) <= 8, f"too many residual English words: {leftovers[:20]}"
+    # Current residue on the paper sample: 1 word ('Week' table header op).
+    # The small threshold guards against gross removal regressions.
+    assert len(leftovers) <= 4, f"too many residual English words: {leftovers[:20]}"
 
 
 # ---- 2 & 3. overlap detection -----------------------------------------------

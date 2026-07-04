@@ -51,11 +51,10 @@ green (golden layout in `tests/golden/`). Run `python src/pipeline.py paper --en
 then `python -m pytest tests/` before and after any change.
 
 ## Known remaining issues (open work, prioritised in docs/IMPROVEMENT_PLAN.md)
-- M1 line clustering can interleave two adjacent lines of different font sizes into one
-  scrambled block (paper p.2 "Table 1" caption) and can emit duplicate blocks from
-  superscript citation rows (paper p.4).
 - A few stray fragments can survive on the title page (author-line superscript affiliation
   markers a/b/c/d; occasional citation number at a paragraph edge).
+- Vector rules (table lines) are not obstacles for placement, so a caption whose Japanese
+  needs more lines than the English can touch the table's top rule.
 - Deck (slides) Japanese generation is less complete than the paper.
 - `mock_memo.json` covers the paper sample only; it is a demo stand-in for a real API.
 - pypdf gotcha (already fixed, do not regress): merge overlay pages onto the WRITER's

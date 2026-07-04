@@ -164,6 +164,42 @@ def build_units(layout):
             "source": text,
         })
         i = j
+
+    # 3) cross-page fix-up. M1's continuation flags bind a page-tail block to its
+    #    continuation on the next page, but a hard-boundary unit can sit between
+    #    them in reading order (e.g. a table caption at the bottom of the column)
+    #    and break the linear merge above. Merge those flagged pairs here.
+    def blk(sid):
+        p, b = map(int, sid.split(":"))
+        return pages[p]["blocks"][b]
+
+    cont_by_page = {}
+    for u in units:
+        fb = blk(u["spans"][0])
+        if fb.get("continues_from_prev_page"):
+            cont_by_page.setdefault(int(u["spans"][0].split(":")[0]) + 1, u)
+    consumed = set()
+    for u in units:
+        if u["uid"] in consumed:
+            continue
+        while True:
+            last = blk(u["spans"][-1])
+            if not last.get("continues_to_next_page"):
+                break
+            nxt = cont_by_page.get(int(u["spans"][-1].split(":")[0]) + 2)  # 1-based next page
+            if nxt is None or nxt is u or nxt["uid"] in consumed:
+                break
+            seg = nxt["source"].lstrip()
+            u["source"] = (u["source"][:-1] + seg) if u["source"].endswith("-") \
+                else (u["source"] + " " + seg)
+            u["spans"] += nxt["spans"]
+            u["pages"] = sorted(set(u["pages"]) | set(nxt["pages"]))
+            u["cross_page"] = True
+            u["multi_block"] = True
+            consumed.add(nxt["uid"])
+    units = [u for u in units if u["uid"] not in consumed]
+    for k, u in enumerate(units):
+        u["uid"] = k
     return units
 
 # ---- glossary ---------------------------------------------------------------

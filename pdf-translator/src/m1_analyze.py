@@ -28,28 +28,40 @@ def load_label_font(sz):
             return ImageFont.truetype(p, sz)
     return ImageFont.load_default()
 
+def _cluster_rows(chars):
+    """Group y-sorted chars into visual rows. A char joins the current row when its
+    vertical span overlaps the row's span by at least half of the SMALLER of the
+    char's height and the row's tallest char height (so raised superscripts still
+    join their base line). The previous running-mean-center rule drifted across
+    adjacent lines of different font sizes and interleaved their text char-by-char
+    (e.g. a small 'Table 1' line swallowed the caption line below it)."""
+    rows = []
+    cur = [chars[0]]
+    cur_top, cur_bot = chars[0]["top"], chars[0]["bottom"]
+    cur_maxh = cur_bot - cur_top
+    for c in chars[1:]:
+        ch = c["bottom"] - c["top"]
+        ov = min(cur_bot, c["bottom"]) - max(cur_top, c["top"])
+        if ov >= 0.5 * min(ch, cur_maxh):
+            cur.append(c)
+            cur_top = min(cur_top, c["top"]); cur_bot = max(cur_bot, c["bottom"])
+            cur_maxh = max(cur_maxh, ch)
+        else:
+            rows.append(cur)
+            cur = [c]; cur_top, cur_bot = c["top"], c["bottom"]; cur_maxh = ch
+    rows.append(cur)
+    return rows
+
 def cluster_lines(chars, gutter=None):
     """Cluster chars into rows by y, then split rows into line-segments by big x-gaps (columns).
     If a gutter x is given, force a split there so two-column rows separate cleanly."""
     chars = [c for c in chars if c.get("text", "").strip() != ""]
     if not chars:
         return []
-    heights = [c["bottom"] - c["top"] for c in chars]
-    mh = statistics.median(heights) or 8.0
     widths = [c["x1"] - c["x0"] for c in chars]
     mw = statistics.median(widths) or 4.0
     chars.sort(key=lambda c: (round(c["top"], 1), c["x0"]))
-    rows = []
-    cur = [chars[0]]
-    cy = (chars[0]["top"] + chars[0]["bottom"]) / 2
-    for c in chars[1:]:
-        ccy = (c["top"] + c["bottom"]) / 2
-        if abs(ccy - cy) <= mh * 0.6:
-            cur.append(c)
-            cy = (cy * (len(cur) - 1) + ccy) / len(cur)
-        else:
-            rows.append(cur); cur = [c]; cy = ccy
-    rows.append(cur)
+    rows = _cluster_rows(chars)
 
     lines = []
     gap_thresh = mw * 3.0
@@ -80,17 +92,8 @@ def find_gutter(chars, page_w, x0=0):
     mid_guess = (lo + hi) / 2
 
     # Group chars into rows; drop rows whose span crosses the center (full-width lines)
-    mh = statistics.median([c["bottom"] - c["top"] for c in chars]) or 8.0
     chars.sort(key=lambda c: (round(c["top"], 1), c["x0"]))
-    rows = []
-    cur = [chars[0]]; cy = (chars[0]["top"] + chars[0]["bottom"]) / 2
-    for c in chars[1:]:
-        ccy = (c["top"] + c["bottom"]) / 2
-        if abs(ccy - cy) <= mh * 0.6:
-            cur.append(c); cy = (cy*(len(cur)-1)+ccy)/len(cur)
-        else:
-            rows.append(cur); cur = [c]; cy = ccy
-    rows.append(cur)
+    rows = _cluster_rows(chars)
 
     band = width * 0.04
     col_chars = []
@@ -138,10 +141,15 @@ def find_gutter(chars, page_w, x0=0):
 
 def _mkline(seg, mw):
     seg.sort(key=lambda c: c["x0"])
+    # Word-gap threshold scaled by THIS segment's median char width, not the
+    # page-wide one: an 8pt caption line on a 10pt page otherwise loses its
+    # inter-word spaces entirely.
+    seg_w = statistics.median([c["x1"] - c["x0"] for c in seg]) or mw
+    gap = min(mw, seg_w) * 0.4
     text = ""
     prev = None
     for c in seg:
-        if prev is not None and c["x0"] - prev["x1"] > mw * 0.5:
+        if prev is not None and c["x0"] - prev["x1"] > gap:
             text += " "
         text += c["text"]
         prev = c
@@ -313,11 +321,17 @@ def analyze_pdf(path, name, render=True):
         is_ref = sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3
         for b in blocks:
             b["type"] = classify_block(b, body_size, pi, ph, is_ref)
-        # blocks directly under a "Table N" caption are table data
+        # blocks directly under a "Table N" caption are table data. Also demote
+        # false "headings" there (column headers like "5 Sets×Reps" match the
+        # numbered-heading regex) - but keep real dotted section headings
+        # ("3. Results") which can legitimately follow a table.
+        SECTION_RE = re.compile(r"^\d+(\.\d+)*\.\s")
         for tc in [b for b in blocks if b["type"] == "caption"
                    and b["text"].lower().startswith("table")]:
             for b in blocks:
-                if b is tc or b["type"] != "body":
+                if b is tc or b["type"] not in ("body", "heading"):
+                    continue
+                if b["type"] == "heading" and SECTION_RE.match(b["text"]):
                     continue
                 if b["col"] == tc["col"] and tc["top"] < b["top"] < tc["top"] + 0.22 * ph:
                     b["type"] = "data"
