@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Rebuild the sandbox mock memo (source-prefix -> final Japanese, values inlined).
 import json
-OUT="/home/claude/analysis"
+from config import OUT, MOCK_MEMO
 units=json.load(open(f"{OUT}/paper_units.json"))
 BY_SRC=[
  ("Original paper The effect","原著論文 アシステッドジャンプがハイパフォーマンスバレーボール選手の垂直跳び高に及ぼす効果"),
@@ -43,5 +43,5 @@ for u in units:
             best=ja; bl=len(norm(pref))
     if best is not None:
         memo.append({"prefix":u['masked'][:48],"ja":best})
-json.dump(memo,open(f"{OUT}/mock_memo.json","w"),ensure_ascii=False,indent=1)
+json.dump(memo,open(MOCK_MEMO,"w"),ensure_ascii=False,indent=1)
 print('memo entries:',len(memo),'/',len(units))

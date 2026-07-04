@@ -10,7 +10,8 @@ citation markers, DOIs, abbreviations) are already replaced by placeholders ⟦T
 The translator must keep those placeholders verbatim. Glossary terms bias terminology.
 """
 from __future__ import annotations
-import os, json, re
+import os, json
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional
 
 
@@ -41,45 +42,60 @@ def _build_user_prompt(text: str, glossary: Dict[str, str], kind: str) -> str:
     return f"{g}Type: {kind}\nTranslate to Japanese (keep ⟦Tn⟧ placeholders):\n{text}"
 
 
+def _map_concurrent(fn, items, max_workers):
+    """Order-preserving concurrent map (unit order must survive translation)."""
+    if max_workers <= 1 or len(items) <= 1:
+        return [fn(it) for it in items]
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return list(ex.map(fn, items))
+
+
 class AnthropicTranslator(Translator):
     """Production engine using the Anthropic Messages API."""
-    def __init__(self, model: str = "claude-sonnet-4-20250514", api_key: Optional[str] = None):
-        self.model = model
+    def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None,
+                 max_workers: int = 4):
+        self.model = model or os.environ.get("PDF_TRANSLATOR_MODEL", "claude-opus-4-8")
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self.max_workers = max_workers
 
     def translate_batch(self, items: List[Dict]) -> List[str]:
         import anthropic  # imported lazily so the sandbox doesn't require it
-        client = anthropic.Anthropic(api_key=self.api_key)
-        out = []
-        for it in items:
+        # SDK retries 429/5xx/connection errors with exponential backoff.
+        client = anthropic.Anthropic(api_key=self.api_key, max_retries=4)
+
+        def one(it):
             msg = client.messages.create(
-                model=self.model, max_tokens=2000,
+                model=self.model, max_tokens=4000,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user",
                            "content": _build_user_prompt(it["text"], it.get("glossary", {}), it.get("kind", "body"))}],
             )
-            out.append("".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip())
-        return out
+            return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
+
+        return _map_concurrent(one, items, self.max_workers)
 
 
 class OpenAITranslator(Translator):
     """Production engine using the OpenAI Chat Completions API."""
-    def __init__(self, model: str = "gpt-4o", api_key: Optional[str] = None):
-        self.model = model
+    def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None,
+                 max_workers: int = 4):
+        self.model = model or os.environ.get("PDF_TRANSLATOR_MODEL", "gpt-4o")
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.max_workers = max_workers
 
     def translate_batch(self, items: List[Dict]) -> List[str]:
         from openai import OpenAI
-        client = OpenAI(api_key=self.api_key)
-        out = []
-        for it in items:
+        client = OpenAI(api_key=self.api_key, max_retries=4)
+
+        def one(it):
             r = client.chat.completions.create(
                 model=self.model, temperature=0.2,
                 messages=[{"role": "system", "content": SYSTEM_PROMPT},
                           {"role": "user", "content": _build_user_prompt(it["text"], it.get("glossary", {}), it.get("kind", "body"))}],
             )
-            out.append(r.choices[0].message.content.strip())
-        return out
+            return r.choices[0].message.content.strip()
+
+        return _map_concurrent(one, items, self.max_workers)
 
 
 class MockTranslator(Translator):
@@ -90,7 +106,12 @@ class MockTranslator(Translator):
     def __init__(self, memo_path: str):
         self.memo = []
         if os.path.exists(memo_path):
-            self.memo = json.load(open(memo_path))  # list of {prefix, ja}
+            raw = json.load(open(memo_path))  # list of {prefix, ja}
+            # normalize prefixes once; longest-first so the first startswith hit
+            # is the longest match (the early-development bug was first-hit-wins)
+            self.memo = sorted(
+                ((self._norm(m["prefix"]), m["ja"]) for m in raw),
+                key=lambda t: -len(t[0]))
 
     @staticmethod
     def _norm(s: str) -> str:
@@ -100,22 +121,22 @@ class MockTranslator(Translator):
         out = []
         for it in items:
             key = self._norm(it["text"])
-            best = None
-            best_len = -1
-            for m in self.memo:
-                p = self._norm(m["prefix"])
-                if key.startswith(p) and len(p) > best_len:
-                    best = m["ja"]; best_len = len(p)
-            out.append(best if best is not None else "")
+            out.append(next((ja for p, ja in self.memo if key.startswith(p)), ""))
         return out
 
 
 def get_translator(name: str = None, **kw) -> Translator:
     name = (name or os.environ.get("PDF_TRANSLATOR_ENGINE") or "mock").lower()
     if name == "anthropic":
+        kw.pop("memo_path", None)
         return AnthropicTranslator(**kw)
     if name == "openai":
+        kw.pop("memo_path", None)
         return OpenAITranslator(**kw)
     if name == "mock":
-        return MockTranslator(kw.get("memo_path", "/home/claude/analysis/mock_memo.json"))
+        memo_path = kw.get("memo_path")
+        if not memo_path:
+            from config import MOCK_MEMO
+            memo_path = MOCK_MEMO
+        return MockTranslator(memo_path)
     raise ValueError(f"unknown translator engine: {name}")

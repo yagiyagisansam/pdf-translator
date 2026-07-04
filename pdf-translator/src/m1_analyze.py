@@ -2,11 +2,10 @@
 # Milestone 1: Layout analysis engine
 import os, re, json, statistics
 import pdfplumber
-import pypdfium2 as pdfium
 from PIL import Image, ImageDraw, ImageFont
 
-OUT = "/home/claude/analysis"
-os.makedirs(OUT, exist_ok=True)
+from config import OUT, ensure_out, resolve_pdf
+
 DPI = 150
 SCALE = DPI / 72.0
 
@@ -289,7 +288,8 @@ def reading_order(blocks):
         b["order"] = i + 1
     return ordered
 
-def analyze_pdf(path, name):
+def analyze_pdf(path, name, render=True):
+    ensure_out()
     doc = {"file": os.path.basename(path), "pages": []}
     pdf = pdfplumber.open(path)
     for pi, page in enumerate(pdf.pages):
@@ -384,8 +384,12 @@ def analyze_pdf(path, name):
     # render annotated pages using pdfplumber's renderer AND its internal coordinate
     # converter (_reproject_bbox), so every box maps exactly regardless of the PDF's
     # cropbox/mediabox/origin quirks. No manual scale/offset math.
-    plumb = pdfplumber.open(path)
     imgs = []
+    if not render:
+        with open(f"{OUT}/{name}_layout.json", "w") as f:
+            json.dump(doc, f, ensure_ascii=False, indent=1)
+        return doc, imgs
+    plumb = pdfplumber.open(path)
     f_lab = load_label_font(18)
     for pi, pinfo in enumerate(doc["pages"]):
         page = plumb.pages[pi]
@@ -434,12 +438,22 @@ def _box(d, b, color, label, font, sx, sy, ox=0.0, oy=0.0):
         d.text((tx+3, ty+1), label, fill=(255,255,255), font=font)
 
 if __name__ == "__main__":
-    files = [
-        ("/mnt/user-data/uploads/The_effect_of_assisted_jumping_on_vertical_jump_height_in_high-performance_volleyball_players.pdf", "paper"),
-        ("/mnt/user-data/uploads/NASA-Navy_telemedicine__Autogenic_feedback_training_exercises_for_motion_sickness.pdf", "deck"),
-    ]
-    for path, name in files:
-        doc, imgs = analyze_pdf(path, name)
+    import argparse
+    ap = argparse.ArgumentParser(description="M1: PDF layout analysis -> <name>_layout.json")
+    ap.add_argument("inputs", nargs="*", default=["paper", "deck"],
+                    help="PDF paths or sample names (default: paper deck)")
+    ap.add_argument("--name", help="override output name (single input only)")
+    ap.add_argument("--no-render", action="store_true",
+                    help="skip annotated PNG rendering (faster)")
+    args = ap.parse_args()
+    if args.name and len(args.inputs) != 1:
+        ap.error("--name requires exactly one input")
+    ensure_out()
+    for inp in args.inputs:
+        path, name = resolve_pdf(inp)
+        if args.name:
+            name = args.name
+        doc, imgs = analyze_pdf(path, name, render=not args.no_render)
         nb = sum(len(p["blocks"]) for p in doc["pages"])
         nf = sum(len(p["figures"]) for p in doc["pages"])
         print(f"[{name}] pages={len(doc['pages'])} blocks={nb} figures={nf} "

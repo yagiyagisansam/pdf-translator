@@ -9,12 +9,11 @@ engine: mock (default, sandbox) | anthropic | openai
 import sys, json
 from translator import get_translator
 from m2_translate import restore
-
-OUT = "/home/claude/analysis"
+from config import OUT, MOCK_MEMO
 
 def run(name: str, engine: str = "mock"):
     units = json.load(open(f"{OUT}/{name}_units.json"))
-    translator = get_translator(engine, memo_path=f"{OUT}/mock_memo.json")
+    translator = get_translator(engine, memo_path=MOCK_MEMO)
     # References are excluded upstream (M1 classifies them as type 'reference', which is
     # not in TRANSLATABLE), so every unit here is body/heading/caption/title to translate.
     items = [{"text": u["masked"], "glossary": u.get("glossary", {}),

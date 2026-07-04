@@ -44,21 +44,23 @@ Translator engines live in `src/translator.py` (`AnthropicTranslator`, `OpenAITr
 `MockTranslator`). Production uses an API engine; the offline demo uses `mock` backed by
 `data/mock_memo.json`. **Do not reintroduce hardcoded per-UID translation tables.**
 
-## FIRST TASKS for Claude Code (in order)
-1. **De-hardcode paths.** Every module currently writes to the absolute path
-   `OUT = "/home/claude/analysis"` and the sample PDF paths are hardcoded in `__main__`.
-   Replace with a CLI/config: input PDF path, output dir, engine. This is prerequisite to
-   everything else and to running outside the original sandbox.
-2. **Add the M4 test suite** (see `tests/`): residual-English count, block-overlap detector,
-   figure-overlap detector, layout-JSON regression vs a golden file. Wire it so every change
-   is checked — this is what prevents the regressions that plagued early development.
-3. Only then resume feature work (remaining polish items below).
+## Setup status (2026-07)
+The original "first tasks" are DONE: paths are de-hardcoded (`src/config.py` + argparse
+CLIs + `src/pipeline.py` one-command runner) and the M4 suite in `tests/` is wired and
+green (golden layout in `tests/golden/`). Run `python src/pipeline.py paper --engine mock`
+then `python -m pytest tests/` before and after any change.
 
-## Known remaining issues (open work, not yet solved)
+## Known remaining issues (open work, prioritised in docs/IMPROVEMENT_PLAN.md)
+- M1 line clustering can interleave two adjacent lines of different font sizes into one
+  scrambled block (paper p.2 "Table 1" caption) and can emit duplicate blocks from
+  superscript citation rows (paper p.4).
 - A few stray fragments can survive on the title page (author-line superscript affiliation
   markers a/b/c/d; occasional citation number at a paragraph edge).
 - Deck (slides) Japanese generation is less complete than the paper.
 - `mock_memo.json` covers the paper sample only; it is a demo stand-in for a real API.
+- pypdf gotcha (already fixed, do not regress): merge overlay pages onto the WRITER's
+  pages after `w.append(...)`; merging onto reader pages drops the overlay on every page
+  after the first with pypdf 6.x.
 
 ## Conventions
 - Keep modules runnable standalone and import-safe.

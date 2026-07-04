@@ -16,3 +16,6 @@ NotoJP*.ttf
 .DS_Store
 # Secrets
 .env
+
+# Golden files are committed on purpose
+!tests/golden/*.json

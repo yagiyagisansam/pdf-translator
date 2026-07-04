@@ -38,23 +38,33 @@ pip install -r requirements.txt
 # Noto CJK (Debian/Ubuntu): sudo apt-get install fonts-noto-cjk
 ```
 
-## Usage (current state — paths are being de-hardcoded; see CLAUDE.md task 1)
+## Usage
+One command runs the whole pipeline (M1 -> M2 -> translate -> fonts -> M3):
 ```bash
-cd src
-python m1_analyze.py            # -> analysis/<name>_layout.json (+ annotated PNGs)
-python m2_translate.py          # -> analysis/<name>_units.json
-python translate_units.py paper mock      # or: anthropic | openai
-python make_jp_font.py          # build subset JP fonts
-python m3_generate.py paper     # -> analysis/paper_ja.pdf
+python src/pipeline.py samples/paper.pdf --engine mock   # offline demo
+python src/pipeline.py mydoc.pdf --engine anthropic      # needs ANTHROPIC_API_KEY
+python src/pipeline.py paper deck                        # sample names also work
 ```
-Select a production engine with an API key:
+Output lands in `analysis/` (override with `PDF_TRANSLATOR_OUT`). Individual stages
+remain runnable standalone with the same arguments:
 ```bash
-export ANTHROPIC_API_KEY=...    # then: python translate_units.py paper anthropic
-export OPENAI_API_KEY=...       # then: python translate_units.py paper openai
+python src/m1_analyze.py mydoc.pdf        # -> analysis/<name>_layout.json (+ PNGs)
+python src/m2_translate.py mydoc          # -> analysis/<name>_units.json
+python src/translate_units.py mydoc mock  # or: anthropic | openai
+python src/make_jp_font.py mydoc          # build subset JP fonts
+python src/m3_generate.py mydoc.pdf       # -> analysis/<name>_ja.pdf
+```
+Environment knobs: `PDF_TRANSLATOR_ENGINE`, `PDF_TRANSLATOR_MODEL` (default
+`claude-opus-4-8`), `PDF_TRANSLATOR_OUT`, `NOTO_CJK_REGULAR`/`NOTO_CJK_BOLD`,
+plus `data/glossary.json` for terminology overrides.
+
+## Verification
+```bash
+python -m pytest tests/     # M4 suite: residual English, overlap, layout regression
 ```
 
 ## Status
-M1 (layout) and M2 (translation pipeline) complete and verified. M3 (Japanese PDF
-generation) largely working: figures preserved, searchable Japanese, cross-page/column
-stitching, collision-aware placement. Remaining polish and the M4 automated checks are
-the next work — see CLAUDE.md and SPEC.md.
+M1-M3 pipeline works end to end (figures preserved, searchable Japanese,
+cross-page/column stitching, collision-aware placement) and the M4 suite is wired
+and green. Remaining work towards a finished product is prioritised in
+`docs/IMPROVEMENT_PLAN.md`; see also CLAUDE.md and SPEC.md.

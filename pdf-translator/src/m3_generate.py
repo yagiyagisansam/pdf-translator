@@ -9,7 +9,7 @@
 #   sandwiched between dropped ops in stream order.
 # - Japanese overlay flows each stitched unit across its constituent block regions
 #   (page/column groups) in reading order, clipped per region (no overlap ever).
-import os, json, glob, re
+import os, json, re
 import pikepdf
 from pikepdf import Pdf, parse_content_stream, unparse_content_stream
 from reportlab.pdfgen import canvas
@@ -19,7 +19,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.lib.colors import Color
 from pypdf import PdfReader, PdfWriter
 
-OUT = "/home/claude/analysis"
+from config import OUT, ensure_out, resolve_pdf
 
 def _register_fonts():
     reg = {}
@@ -126,12 +126,24 @@ def remove_text_by_content(page, owner, kill_blob):
     page.Contents = owner.make_stream(unparse_content_stream(out))
 
 # ---- Japanese text layout ----------------------------------------------------
+# Per-(font, size) character-width cache. reportlab's stringWidth is a plain sum
+# of glyph advances (no kerning), so accumulating cached per-char widths is exact
+# and turns _wrap from O(len^2) stringWidth work into O(len) dict lookups. _wrap
+# is called ~20x per unit during the font-size search, so this dominates M3 time.
+_W_CACHE = {}
+
 def _wrap(text, font, size, max_w):
-    lines=[]; cur=""
+    cache = _W_CACHE.setdefault((font, size), {})
+    lines=[]; cur=""; cur_w=0.0
     for ch in text:
-        if ch=="\n": lines.append(cur); cur=""; continue
-        if stringWidth(cur+ch,font,size)<=max_w: cur+=ch
-        else: lines.append(cur); cur=ch
+        if ch=="\n": lines.append(cur); cur=""; cur_w=0.0; continue
+        w = cache.get(ch)
+        if w is None:
+            w = cache[ch] = stringWidth(ch, font, size)
+        if cur_w + w <= max_w:
+            cur += ch; cur_w += w
+        else:
+            lines.append(cur); cur = ch; cur_w = w
     if cur: lines.append(cur)
     return lines
 
@@ -198,6 +210,7 @@ def _remaining_after(text, taken_lines):
 
 # ---- main pipeline -------------------------------------------------------------
 def generate(name, src_path):
+    ensure_out()
     _register_fonts()
     units=json.load(open(f"{OUT}/{name}_bilingual.json"))
     layout=json.load(open(f"{OUT}/{name}_layout.json"))
@@ -308,6 +321,18 @@ def generate(name, src_path):
     per_page_draws={pi:[] for pi in range(npages)}
     for uid,(u,regs) in unit_regions.items():
         _flow_unit_across_regions(u["target"], u["type"], regs, layout, per_page_draws)
+
+    # Persist the actually-drawn line boxes so M4 can verify text/figure overlap
+    # on real placement data instead of the pre-layout block bboxes.
+    placed = {}
+    for pi, draws in per_page_draws.items():
+        placed[str(pi + 1)] = [
+            {"x0": d["x"], "top": d["y_top"],
+             "x1": d["x"] + stringWidth(d["line"], d["font"], d["size"]),
+             "bottom": d["y_top"] + d["size"] * 1.16}
+            for d in draws]
+    with open(f"{OUT}/{name}_placed.json", "w") as f:
+        json.dump(placed, f)
     c=None
     for pi in range(npages):
         pw,ph,xo,yo=page_sizes[pi]
@@ -322,23 +347,32 @@ def generate(name, src_path):
         c.showPage()
     c.save()
 
-    # 3) merge overlay onto stripped pages
-    base=PdfReader(stripped); over=PdfReader(overlay); w=PdfWriter()
-    for i,page in enumerate(base.pages):
+    # 3) merge overlay onto stripped pages.
+    # Append the base to the writer FIRST, then merge onto the writer's pages.
+    # Merging onto reader pages and add_page()-ing them afterwards silently drops
+    # the overlay on every page after the first with pypdf 6.x (shared overlay
+    # font resources don't survive the reader-page -> writer copy).
+    over=PdfReader(overlay); w=PdfWriter()
+    w.append(PdfReader(stripped))
+    for i,page in enumerate(w.pages):
         if i<len(over.pages): page.merge_page(over.pages[i])
-        w.add_page(page)
     out_path=f"{OUT}/{name}_ja.pdf"
     with open(out_path,"wb") as f: w.write(f)
     return out_path, stripped
 
 if __name__=="__main__":
-    import sys
-    names = sys.argv[1:] or ["paper"]
-    SRC = {
-        "paper": "/mnt/user-data/uploads/The_effect_of_assisted_jumping_on_vertical_jump_height_in_high-performance_volleyball_players.pdf",
-        "deck": "/mnt/user-data/uploads/NASA-Navy_telemedicine__Autogenic_feedback_training_exercises_for_motion_sickness.pdf",
-    }
-    for name in names:
-        out,stripped=generate(name, SRC[name])
-        a=os.path.getsize(SRC[name]); b=os.path.getsize(out)
+    import argparse
+    ap = argparse.ArgumentParser(description="M3: bilingual + layout + source PDF -> <name>_ja.pdf")
+    ap.add_argument("inputs", nargs="*", default=["paper"],
+                    help="PDF paths or sample names (default: paper)")
+    ap.add_argument("--name", help="override document name (single input only)")
+    args = ap.parse_args()
+    if args.name and len(args.inputs) != 1:
+        ap.error("--name requires exactly one input")
+    for inp in args.inputs:
+        src, name = resolve_pdf(inp)
+        if args.name:
+            name = args.name
+        out,stripped=generate(name, src)
+        a=os.path.getsize(src); b=os.path.getsize(out)
         print(f"[{name}] source={a/1024:.0f}KB -> japanese={b/1024:.0f}KB ({out})")

@@ -8,7 +8,7 @@
 
 import os, re, json
 
-OUT = "/home/claude/analysis"
+from config import OUT, ensure_out
 
 # ---- token protection -------------------------------------------------------
 # Patterns whose matched text must survive translation verbatim.
@@ -181,6 +181,17 @@ DEFAULT_GLOSSARY = {
     "biofeedback": "バイオフィードバック",
 }
 
+def load_glossary():
+    """DEFAULT_GLOSSARY merged with an optional user glossary at <data>/glossary.json
+    ({'english term': '日本語'}) so terminology can be tuned without code changes."""
+    from config import DATA_DIR
+    glossary = dict(DEFAULT_GLOSSARY)
+    user_path = os.path.join(DATA_DIR, "glossary.json")
+    if os.path.exists(user_path):
+        glossary.update(json.load(open(user_path)))
+    return glossary
+
+
 def apply_glossary_hint(units, glossary):
     """Attach per-unit glossary hints (terms found in the unit) for the translator."""
     for u in units:
@@ -191,10 +202,21 @@ def apply_glossary_hint(units, glossary):
     return units
 
 if __name__ == "__main__":
-    for name in ["paper", "deck"]:
-        layout = json.load(open(f"{OUT}/{name}_layout.json"))
+    import argparse, sys
+    ap = argparse.ArgumentParser(description="M2: layout.json -> <name>_units.json")
+    ap.add_argument("names", nargs="*", default=["paper", "deck"],
+                    help="document names whose <name>_layout.json exists (default: paper deck)")
+    args = ap.parse_args()
+    ensure_out()
+    for name in args.names:
+        layout_path = f"{OUT}/{name}_layout.json"
+        if not os.path.exists(layout_path):
+            print(f"[{name}] skipped: {layout_path} not found (run m1_analyze first)",
+                  file=sys.stderr)
+            continue
+        layout = json.load(open(layout_path))
         units = build_units(layout)
-        units = apply_glossary_hint(units, DEFAULT_GLOSSARY)
+        units = apply_glossary_hint(units, load_glossary())
         # add masked text + token map per unit
         for u in units:
             masked, mapping = protect(u["source"])
