@@ -38,7 +38,18 @@ pip install -r requirements.txt
 # Noto CJK (Debian/Ubuntu): sudo apt-get install fonts-noto-cjk
 ```
 
-## Usage
+## Web app (M5)
+```bash
+python src/webapp.py    # -> http://localhost:8000
+```
+Upload an English PDF, watch progress, download the Japanese PDF. Each job runs
+in its own subprocess and output directory, so concurrent jobs are isolated.
+Set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` on the server to enable the API
+engines; `mock` works offline for the bundled samples. Knobs:
+`PDF_TRANSLATOR_MAX_MB` (upload cap, default 50), `PDF_TRANSLATOR_WORKERS`
+(parallel jobs, default 2), `HOST`/`PORT`.
+
+## CLI
 One command runs the whole pipeline (M1 -> M2 -> translate -> fonts -> M3):
 ```bash
 python src/pipeline.py samples/paper.pdf --engine mock   # offline demo

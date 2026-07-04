@@ -18,8 +18,36 @@ import make_jp_font
 import m3_generate
 
 
+class UnsupportedPdfError(ValueError):
+    """Input PDF that the pipeline cannot process, with a user-facing reason."""
+
+
+def validate_pdf(pdf_path):
+    """Fail fast with a clear message on inputs the pipeline cannot handle:
+    encrypted PDFs and image-only (scanned) PDFs without a text layer."""
+    from pypdf import PdfReader
+    try:
+        rd = PdfReader(pdf_path)
+    except Exception as e:
+        raise UnsupportedPdfError(f"cannot open as PDF: {e}")
+    if rd.is_encrypted:
+        raise UnsupportedPdfError(
+            "encrypted/password-protected PDFs are not supported "
+            "(暗号化されたPDFは未対応です)")
+    import pdfplumber
+    with pdfplumber.open(pdf_path) as pdf:
+        if len(pdf.pages) == 0:
+            raise UnsupportedPdfError("PDF has no pages")
+        nchars = sum(len(p.chars) for p in pdf.pages[:5])
+    if nchars < 50:
+        raise UnsupportedPdfError(
+            "no extractable text layer - scanned/image-only PDFs need OCR first "
+            "(テキスト層がないスキャンPDFは未対応です。先にOCRをかけてください)")
+
+
 def run_one(pdf_path, name, engine, render):
     t0 = time.time()
+    validate_pdf(pdf_path)
     print(f"== [{name}] M1 layout analysis: {pdf_path}")
     doc, _ = m1_analyze.analyze_pdf(pdf_path, name, render=render)
     nb = sum(len(p["blocks"]) for p in doc["pages"])
@@ -69,7 +97,11 @@ def main():
         pdf_path, name = resolve_pdf(inp)
         if args.name:
             name = args.name
-        outputs.append(run_one(pdf_path, name, args.engine, args.render))
+        try:
+            outputs.append(run_one(pdf_path, name, args.engine, args.render))
+        except UnsupportedPdfError as e:
+            print(f"error: [{name}] {e}", file=sys.stderr)
+            sys.exit(2)
     print("\nDone:")
     for o in outputs:
         print(" ", o)
