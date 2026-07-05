@@ -114,6 +114,10 @@ def _run_job(job_id):
     job = JOBS[job_id]
     out_dir = os.path.join(JOBS_DIR, job_id)
     env = dict(os.environ, PDF_TRANSLATOR_OUT=out_dir)
+    # per-job Gemini key from the phone (form field), injected for this
+    # subprocess only - never written to disk or logged
+    if job.get("_api_key"):
+        env["GEMINI_API_KEY"] = job["_api_key"]
     # 4-role orchestrator: producer -> translator -> editor -> qa (retry loop)
     cmd = [sys.executable, "-m", "roles.orchestrator",
            os.path.join(out_dir, "input.pdf"), "--name", "doc",
@@ -149,17 +153,20 @@ ENGINE_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
 @app.post("/api/jobs")
 async def create_job(request: Request, file: UploadFile = File(...),
-                     engine: str = Form("google")):
+                     engine: str = Form("google"), api_key: str = Form("")):
     _require_auth(request)
     _sweep()
     if engine not in ("mock", "google", "gemini", "anthropic", "openai"):
         raise HTTPException(400, "unknown engine")
     if engine in ENGINE_KEYS and not os.environ.get(ENGINE_KEYS[engine]):
         raise HTTPException(400, f"{ENGINE_KEYS[engine]} is not set on the server")
-    if engine == "gemini" and not (os.environ.get("GEMINI_API_KEY")
+    # Gemini key can come FROM THE PHONE (this form field) - no terminal / env var
+    # needed. It is used for this one job only and never stored or logged.
+    api_key = (api_key or "").strip()
+    if engine == "gemini" and not (api_key or os.environ.get("GEMINI_API_KEY")
                                    or os.environ.get("GOOGLE_API_KEY")):
-        raise HTTPException(400, "GEMINI_API_KEY (or GOOGLE_API_KEY) is not set "
-                                 "on the server")
+        raise HTTPException(400, "Gemini APIキーを入力してください（Google AI Studio "
+                                 "で無料発行できます）")
     data = await file.read()
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"file exceeds {MAX_UPLOAD_MB}MB")
@@ -172,7 +179,8 @@ async def create_job(request: Request, file: UploadFile = File(...),
         f.write(data)
     JOBS[job_id] = {"status": "queued", "stage": "待機中", "error": None,
                     "result": None, "filename": file.filename or "document.pdf",
-                    "engine": engine, "created": time.time()}
+                    "engine": engine, "created": time.time(),
+                    "_api_key": api_key}  # underscore key = never persisted
     _persist(job_id)
     threading.Thread(target=_run_job, args=(job_id,), daemon=True).start()
     return {"id": job_id}
@@ -252,18 +260,30 @@ small{color:#888}
     <option value="openai">OpenAI API(要 OPENAI_API_KEY・有料)</option>
     <option value="mock">mock(オフラインデモ・サンプル専用)</option>
   </select>
+  <div id="keyrow" style="display:none">
+    <label>Gemini APIキー(スマホでも貼り付けOK・保存しません)</label>
+    <input type="password" id="apikey" autocomplete="off"
+           placeholder="AIza... を貼り付け" style="width:100%;padding:8px;
+           border:1px solid #8886;border-radius:6px">
+    <small>Google AI Studio（aistudio.google.com）で無料発行したキーを貼り付けてください。
+    この1回の翻訳にのみ使用し、サーバに保存しません。</small>
+  </div>
   <button id="go">翻訳する</button>
   <div id="status"></div>
 </div>
 <p><small>暗号化PDF・テキスト層のないスキャンPDFは未対応です。</small></p>
 <script>
 const $=id=>document.getElementById(id);
+$('engine').onchange=()=>{
+  $('keyrow').style.display = $('engine').value==='gemini' ? 'block' : 'none';
+};
 $('go').onclick=async()=>{
   const f=$('file').files[0];
   if(!f){$('status').textContent='ファイルを選択してください';return;}
   $('go').disabled=true;
   $('status').textContent='アップロード中…';
   const fd=new FormData();fd.append('file',f);fd.append('engine',$('engine').value);
+  if($('engine').value==='gemini') fd.append('api_key',$('apikey').value.trim());
   try{
     const r=await fetch('/api/jobs',{method:'POST',body:fd});
     if(!r.ok){throw new Error((await r.json()).detail||r.statusText);}
