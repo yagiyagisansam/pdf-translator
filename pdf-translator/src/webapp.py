@@ -13,14 +13,17 @@ Operations:
   restart doesn't lose finished jobs / their downloads.
 - Finished job directories are swept after PDF_TRANSLATOR_JOB_TTL_H hours
   (default 24); a background thread also runs the sweep hourly.
-- Optional auth: if PDF_TRANSLATOR_TOKEN is set, every /api call must send it as
-  `Authorization: Bearer <token>` (or ?token=). Unset = open (local/free use).
+- Private mode ("only me"): set PDF_TRANSLATOR_TOKEN to a password and the WHOLE
+  site (page + API) requires it. The browser shows a normal login prompt (enter
+  any username, the password you set) and remembers it. Programmatic clients can
+  instead send `Authorization: Bearer <token>` or `?token=`. Unset = open.
 
 Engines: 'google' (free, keyless) default; 'gemini' (free tier, needs a Google
 AI Studio key); 'anthropic'/'openai' paid; 'mock' offline demo.
 """
+import base64
 import json as _json
-import os, re, shutil, subprocess, sys, threading, time, uuid
+import os, re, secrets, shutil, subprocess, sys, threading, time, uuid
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -79,16 +82,33 @@ def _sweep():
             JOBS.pop(jid, None)
 
 
-def _require_auth(request):
+def _auth_ok(request):
+    """True if the request carries the right secret. Accepts a browser Basic-Auth
+    login (any username, password == the token) OR a Bearer header / ?token= for
+    programmatic clients."""
     if not AUTH_TOKEN:
-        return
-    sent = request.headers.get("authorization", "")
-    if sent.startswith("Bearer "):
-        sent = sent[7:]
-    if not sent:
-        sent = request.query_params.get("token", "")
-    if sent != AUTH_TOKEN:
-        raise HTTPException(401, "invalid or missing token")
+        return True
+    hdr = request.headers.get("authorization", "")
+    if hdr.startswith("Basic "):
+        try:
+            _, _, pw = base64.b64decode(hdr[6:]).decode("utf-8").partition(":")
+            if secrets.compare_digest(pw, AUTH_TOKEN):
+                return True
+        except Exception:
+            pass
+    bearer = hdr[7:] if hdr.startswith("Bearer ") else request.query_params.get("token", "")
+    return bool(bearer) and secrets.compare_digest(bearer, AUTH_TOKEN)
+
+
+@app.middleware("http")
+async def _auth_middleware(request, call_next):
+    # Whole-site gate: when a password is set, the page AND the API require it,
+    # so the browser shows a login prompt and only you can open the app.
+    if not _auth_ok(request):
+        from starlette.responses import Response
+        return Response("認証が必要です（パスワードを入力してください）", status_code=401,
+                        headers={"WWW-Authenticate": 'Basic realm="pdf-translator"'})
+    return await call_next(request)
 
 # The orchestrator prints "  [<role>] <detail>" per step.
 ROLE_LABELS = {
@@ -154,7 +174,6 @@ ENGINE_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 @app.post("/api/jobs")
 async def create_job(request: Request, file: UploadFile = File(...),
                      engine: str = Form("google"), api_key: str = Form("")):
-    _require_auth(request)
     _sweep()
     if engine not in ("mock", "google", "gemini", "anthropic", "openai"):
         raise HTTPException(400, "unknown engine")
@@ -188,7 +207,6 @@ async def create_job(request: Request, file: UploadFile = File(...),
 
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str, request: Request):
-    _require_auth(request)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
@@ -198,7 +216,6 @@ def job_status(job_id: str, request: Request):
 
 @app.get("/api/jobs/{job_id}/download")
 def job_download(job_id: str, request: Request):
-    _require_auth(request)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
