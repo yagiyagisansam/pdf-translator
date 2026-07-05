@@ -52,6 +52,40 @@ def _pdf_pages(path):
     return pages
 
 
+def _is_jp(t):
+    return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" for c in t)
+
+
+def _is_latin_word(t):
+    return sum(c.isascii() and c.isalpha() for c in t) >= 2 and not _is_jp(t)
+
+
+def _jp_on_english_overlaps(path):
+    """Read the FINISHED PDF with pdfplumber and count places where a drawn
+    Japanese word physically overlaps a surviving English word. Because both are
+    read from the same output in pdfplumber's own coordinate system, this is
+    immune to the pdfplumber-vs-content-stream offset gotcha and catches residual
+    English that the producer's strip missed and the editor then drew over.
+    Returns [(page, english, x0, top), ...]."""
+    import pdfplumber
+    hits = []
+    with pdfplumber.open(path) as pdf:
+        for pi, page in enumerate(pdf.pages, start=1):
+            words = page.extract_words()
+            jp = [w for w in words if _is_jp(w["text"])]
+            en = [w for w in words if _is_latin_word(w["text"])]
+            if not jp or not en:
+                continue
+            for e in en:
+                for j in jp:
+                    ix = min(e["x1"], j["x1"]) - max(e["x0"], j["x0"])
+                    iy = min(e["bottom"], j["bottom"]) - max(e["top"], j["top"])
+                    if ix > 0 and iy > 0 and ix * iy > 6:
+                        hits.append((pi, e["text"], round(e["x0"]), round(e["top"])))
+                        break
+    return hits
+
+
 def _allowed_latin_blob(units, layout):
     parts = []
     for p in layout["pages"]:
@@ -101,6 +135,15 @@ def review(name, editor_report):
         defects.append({"role": "editor", "kind": "residual_english",
                         "detail": f"{len(residual)} residual English words "
                                   f"{residual[:12]}", "param": "restrip"})
+
+    # residual English drawn UNDER Japanese (text-on-text) - the producer's strip
+    # missed it and the editor reflowed Japanese on top. Read from the finished
+    # PDF so the check sees exactly what a reader sees.
+    ov = _jp_on_english_overlaps(out_path)
+    if ov:
+        defects.append({"role": "producer", "kind": "text_overlap",
+                        "detail": f"{len(ov)} English fragment(s) overlap Japanese "
+                                  f"{ov[:8]}", "param": "restrip"})
 
     drawn_chars = sum(len(ln["text"]) for lines in placed.values() for ln in lines)
     translated = [u for u in units if u.get("target")]

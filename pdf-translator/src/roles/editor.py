@@ -64,8 +64,31 @@ def _obstacles_for(page, x0, x1):
     return _merged_bands(obs)
 
 
+def _justify_amount(d):
+    """Char spacing (両端揃え) that stretches a justified line's right edge to the
+    column edge, or None if the line should stay ragged. Only full-ish lines are
+    justified, and the stretch is capped so a nearly-empty line is never blown
+    apart into gappy characters."""
+    if not d.get("justify") or d.get("width") is None:
+        return None
+    n = len(d["line"])
+    if n < 2:
+        return None
+    nat = stringWidth(d["line"], d["font"], d["size"])
+    slack = d["width"] - nat
+    if slack <= 0 or nat < 0.6 * d["width"]:
+        return None
+    cs = slack / (n - 1)
+    if cs > d["size"] * 0.6:            # too sparse -> leave ragged
+        return None
+    return cs
+
+
 def _unit_lines(units, size, width, font_of):
-    """Flat [(text|None, font)] for a run of units, with paragraph/heading gaps."""
+    """Flat [(text|None, font, justify)] for a run of units, with paragraph/
+    heading gaps. `justify` is True on every wrapped line EXCEPT the last line of
+    a paragraph (which stays ragged, like normal typesetting) and headings/titles
+    (short, left-aligned). Gap rows carry justify=False."""
     out = []
     for k, u in enumerate(units):
         if not u.get("target"):
@@ -74,9 +97,12 @@ def _unit_lines(units, size, width, font_of):
         if out:
             gap = HEAD_GAP if u["type"] in ("heading", "title") else PARA_GAP
             for _ in range(max(1, round(gap))):
-                out.append((None, font))
-        for ln in m3._wrap(u["target"], font, size, width):
-            out.append((ln, font))
+                out.append((None, font, False))
+        wrapped = m3._wrap(u["target"], font, size, width)
+        is_head = u["type"] in ("heading", "title")
+        for j, ln in enumerate(wrapped):
+            last = j == len(wrapped) - 1
+            out.append((ln, font, (not is_head) and (not last)))
     return out
 
 
@@ -95,7 +121,7 @@ def _flow_column(lines, x0, width, y, y_bottom, bands, lh):
     """Place lines from y downward, skipping obstacle bands. Returns
     (draws, y_end, remainder_lines)."""
     draws = []
-    for i, (txt, font) in enumerate(lines):
+    for i, (txt, font, justify) in enumerate(lines):
         while True:
             hit = next(((t, b) for (t, b) in bands if y < b and y + lh > t), None)
             if hit is None:
@@ -104,7 +130,8 @@ def _flow_column(lines, x0, width, y, y_bottom, bands, lh):
         if y + lh > y_bottom + 0.1:
             return draws, y, lines[i:]
         if txt is not None:
-            draws.append({"x": x0, "y_top": y, "size": None, "font": font, "line": txt})
+            draws.append({"x": x0, "y_top": y, "size": None, "font": font,
+                          "line": txt, "width": width, "justify": justify})
         y += lh
     return draws, y, []
 
@@ -280,7 +307,8 @@ def build(name, src_path, floor=6.0):
     for pi, draws in per_page.items():
         placed[str(pi + 1)] = [
             {"x0": d["x"], "top": d["y_top"],
-             "x1": d["x"] + stringWidth(d["line"], d["font"], d["size"]),
+             "x1": d["x"] + (d["width"] if _justify_amount(d) is not None
+                             else stringWidth(d["line"], d["font"], d["size"])),
              "bottom": d["y_top"] + d["size"] * LR, "text": d["line"][:40]}
             for d in draws]
     json.dump(placed, open(f"{OUT}/{name}_placed.json", "w"))
@@ -296,9 +324,14 @@ def build(name, src_path, floor=6.0):
         c = canvas.Canvas(overlay, pagesize=(pw, ph)) if c is None else c
         if pi:
             c.setPageSize((pw, ph))
+        c.setFillColor(Color(0, 0, 0))
         for d in per_page.get(pi, []):
-            c.setFillColor(Color(0, 0, 0)); c.setFont(d["font"], d["size"])
-            c.drawString(d["x"] - xo, ph - d["y_top"] - d["size"], d["line"])
+            cs = _justify_amount(d)
+            t = c.beginText(d["x"] - xo, ph - d["y_top"] - d["size"])
+            t.setFont(d["font"], d["size"])
+            t.setCharSpace(cs if cs is not None else 0)
+            t.textLine(d["line"])
+            c.drawText(t)
         c.showPage()
     c.save()
     over = PdfReader(overlay); w = PdfWriter(); w.append(PdfReader(stripped))
