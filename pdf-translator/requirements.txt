@@ -5,6 +5,8 @@ pypdfium2>=4.30
 reportlab>=4.0
 fontTools>=4.50
 Pillow>=10.0
+# Free keyless translation engine
+deep-translator>=1.11
 # Web app (M5)
 fastapi>=0.110
 uvicorn>=0.29

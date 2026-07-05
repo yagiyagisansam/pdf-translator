@@ -60,6 +60,9 @@ then `python -m pytest tests/` before and after any change.
 - pypdf gotcha (already fixed, do not regress): merge overlay pages onto the WRITER's
   pages after `w.append(...)`; merging onto reader pages drops the overlay on every page
   after the first with pypdf 6.x.
+- deep-translator gotcha (already fixed, do not regress): `GoogleTranslator` mutates
+  internal request state and is NOT thread-safe - construct one instance PER CALL, or
+  concurrent units receive each other's translations (and the cache pins the corruption).
 
 ## Conventions
 - Keep modules runnable standalone and import-safe.

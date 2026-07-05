@@ -35,7 +35,12 @@ WORD_RE = re.compile(r"[A-Za-z][A-Za-z\-']{3,}")
 TRANS = {"body", "heading", "caption", "title"}
 
 
+_LIG = {"ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl"}
+
+
 def _norm(s):
+    for k, v in _LIG.items():
+        s = s.replace(k, v)
     return "".join(ch.lower() for ch in s if ch.isalnum())
 
 

@@ -150,28 +150,37 @@ def _wrap(text, font, size, max_w):
 def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws):
     """Flow `text` across the unit's regions (in reading order). Pick the largest
     font (capped) such that all wrapped lines fit within the total region capacity,
-    then lay lines into region 1, overflow into region 2, etc. Every region is
-    clipped to its own collision-free box, so no overlap with neighbours/figures."""
+    then lay lines into region 1, overflow into region 2, etc. Line slots skip
+    the region's obstacle bands (foreign blocks/figures inside the box), so no
+    overlap with neighbours or figures is possible."""
     if not text:
         return
     font = "NotoJP-Bold" if btype in ("heading", "title") else "NotoJP"
     FLOOR = 5.5
     CAP = 10.5
 
-    def region_capacity(rb, size):
+    def region_slots(rb, size):
+        """y positions where a line of this size can be drawn: a fixed grid from
+        the region top, minus slots that intersect an obstacle band."""
         lh = size * 1.16
-        h = max(0, rb["avail_bottom"] - rb["top"])
-        return max(0, int(h // lh)), lh
+        obstacles = rb.get("obstacles", ())
+        slots = []
+        y = rb["top"]
+        while y + lh <= rb["avail_bottom"] + 0.1:
+            if not any(y < ob and y + lh > ot for (ot, ob) in obstacles):
+                slots.append(y)
+            y += lh
+        return slots, lh
 
     def total_fits(size):
         remaining = text
         for (pi, rb) in regs:
             w = max(10, rb["x1"] - rb["x0"])
-            cap, lh = region_capacity(rb, size)
+            slots, lh = region_slots(rb, size)
             lines = _wrap(remaining, font, size, w)
-            if len(lines) <= cap:
+            if len(lines) <= len(slots):
                 return True
-            remaining = _remaining_after(remaining, lines[:cap])
+            remaining = _remaining_after(remaining, lines[:len(slots)])
             if not remaining:
                 return True
         return len(_wrap(remaining, font, size,
@@ -184,20 +193,18 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws):
         size -= 0.25
     size = max(FLOOR, size)
 
-    # distribute lines, clipping every region to its capacity
+    # distribute lines into each region's free slots
     remaining = text
     for ri, (pi, rb) in enumerate(regs):
         w = max(10, rb["x1"] - rb["x0"])
-        cap, lh = region_capacity(rb, size)
-        if cap <= 0:
+        slots, lh = region_slots(rb, size)
+        if not slots:
             continue
         lines = _wrap(remaining, font, size, w)
-        take = lines[:cap]
-        y = rb["top"]
-        for ln in take:
+        take = lines[:len(slots)]
+        for y, ln in zip(slots, take):
             per_page_draws[pi].append({"x": rb["x0"], "y_top": y, "size": size,
                                        "font": font, "line": ln})
-            y += lh
         remaining = _remaining_after(remaining, take)
         if not remaining:
             break
@@ -253,21 +260,27 @@ def generate(name, src_path):
             fb = f["bottom"] + clear
             if top < fb and bottom > f["top"] - 2 and fb < bottom + 80:
                 top = max(top, fb)
-        # nearest element below that overlaps horizontally => available bottom
+        # nearest element below that overlaps horizontally => available bottom.
+        # Blocks that merely ABUT the unit's bbox (gap < 0.5pt, e.g. the keywords
+        # line right under an abstract) are obstacles too - skipping them let
+        # longer Japanese flow into the neighbour's space. Only elements clearly
+        # above the unit's bottom are ignored; the max(bottom, ...) floor below
+        # keeps slight source overlaps from shrinking the region.
         h = layout["pages"][pi]["height"]
         avail_bottom = h
         for ob in blocks_all:
-            if id(ob) in own or ob["top"] <= bottom + 0.5:
+            if id(ob) in own or ob["top"] <= bottom - 2.0:
                 continue
             if overlaps_x(x0, x1, ob["x0"], ob["x1"]):
                 avail_bottom = min(avail_bottom, ob["top"])
         for f in figs:
-            if f["top"] <= bottom + 0.5:
+            if f["top"] <= bottom - 2.0:
                 continue
             if overlaps_x(x0, x1, f["x0"], f["x1"]):
                 avail_bottom = min(avail_bottom, f["top"] - FIG_MARGIN)
         avail_bottom = max(bottom, avail_bottom - 2.0)
-        return {"x0": x0, "x1": x1, "top": top, "avail_bottom": avail_bottom}
+        return {"x0": x0, "x1": x1, "top": top, "avail_bottom": avail_bottom,
+                "own": own, "page": pi, "obstacles": []}
 
     # Per page, the concatenated normalized text of all TRANSLATED blocks.
     # The content-based kill removes any text-show op whose text is part of this blob.
@@ -303,6 +316,42 @@ def generate(name, src_path):
             regs.append((spi, rb))
         unit_regions[u["uid"]] = (u, regs)
 
+    # Second pass: obstacle bands per region. A region's line slots must skip
+    # (a) every OTHER region's box (that's where another unit's Japanese will be
+    # drawn - the title page can float a small block like "Abstract" inside a
+    # larger stitched unit's box), (b) blocks whose English stays visible
+    # (data/running heads/untranslated units), and (c) figures.
+    regs_by_page = {}
+    for _, regs in unit_regions.values():
+        for pi, rb in regs:
+            regs_by_page.setdefault(pi, []).append(rb)
+    translated_blocks = set()
+    for _, regs in unit_regions.values():
+        for pi, rb in regs:
+            translated_blocks |= rb["own"]
+    for pi, p in enumerate(layout["pages"]):
+        page_regs = regs_by_page.get(pi, [])
+        visible = [b for b in p["blocks"] if id(b) not in translated_blocks]
+        for rb in page_regs:
+            bands = rb["obstacles"]
+            for rb2 in page_regs:
+                if rb2 is rb:
+                    continue
+                if overlaps_x(rb["x0"], rb["x1"], rb2["x0"], rb2["x1"]):
+                    bands.append((rb2["top"] - 1.0, rb2["avail_bottom"] + 1.0))
+            for b in visible:
+                if overlaps_x(rb["x0"], rb["x1"], b["x0"], b["x1"]):
+                    bands.append((b["top"] - 1.0, b["bottom"] + 1.0))
+            for f in p.get("figures", []):
+                if overlaps_x(rb["x0"], rb["x1"], f["x0"], f["x1"]):
+                    bands.append((f["top"] - 8.0, f["bottom"] + 8.0))
+            # keep only bands that actually cut into this region's slot range,
+            # and never let a band that covers the region's own start erase the
+            # whole region (mutually-overlapping source boxes would deadlock)
+            rb["obstacles"] = [(t, b) for (t, b) in bands
+                               if b > rb["top"] + 1.0 and t < rb["avail_bottom"] - 1.0
+                               and t > rb["top"] + 1.0]
+
     # 1) strip English in-place (content-based, coordinate-free)
     pdf=Pdf.open(src_path)
     for pi,page in enumerate(pdf.pages):
@@ -329,7 +378,8 @@ def generate(name, src_path):
         placed[str(pi + 1)] = [
             {"x0": d["x"], "top": d["y_top"],
              "x1": d["x"] + stringWidth(d["line"], d["font"], d["size"]),
-             "bottom": d["y_top"] + d["size"] * 1.16}
+             "bottom": d["y_top"] + d["size"] * 1.16,
+             "text": d["line"][:40]}
             for d in draws]
     with open(f"{OUT}/{name}_placed.json", "w") as f:
         json.dump(placed, f)

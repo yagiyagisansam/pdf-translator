@@ -74,7 +74,7 @@ def _run_job(job_id):
 
 @app.post("/api/jobs")
 async def create_job(file: UploadFile = File(...), engine: str = Form("mock")):
-    if engine not in ("mock", "anthropic", "openai"):
+    if engine not in ("mock", "google", "anthropic", "openai"):
         raise HTTPException(400, "unknown engine")
     if engine == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
         raise HTTPException(400, "ANTHROPIC_API_KEY is not set on the server")
@@ -145,8 +145,9 @@ small{color:#888}
   <input type="file" id="file" accept="application/pdf">
   <label>翻訳エンジン</label>
   <select id="engine">
-    <option value="anthropic">Anthropic API(要 ANTHROPIC_API_KEY)</option>
-    <option value="openai">OpenAI API(要 OPENAI_API_KEY)</option>
+    <option value="google" selected>Google 翻訳(無料・APIキー不要)</option>
+    <option value="anthropic">Anthropic API(要 ANTHROPIC_API_KEY・有料)</option>
+    <option value="openai">OpenAI API(要 OPENAI_API_KEY・有料)</option>
     <option value="mock">mock(オフラインデモ・サンプル専用)</option>
   </select>
   <button id="go">翻訳する</button>

@@ -69,6 +69,20 @@ Environment knobs: `PDF_TRANSLATOR_ENGINE`, `PDF_TRANSLATOR_MODEL` (default
 `claude-opus-4-8`), `PDF_TRANSLATOR_OUT`, `NOTO_CJK_REGULAR`/`NOTO_CJK_BOLD`,
 plus `data/glossary.json` for terminology overrides.
 
+## Engines & cost
+| engine | cost | notes |
+|---|---|---|
+| `google` | **free, no API key** | deep-translator -> Google web endpoint; no glossary; light/personal volume |
+| `anthropic-batch` | 50% of API price | Message Batches API; asynchronous (minutes) - bulk documents |
+| `anthropic` / `openai` | API price | interactive latency; glossary + placeholder round-trip |
+| `mock` | free | offline demo for the bundled samples |
+
+Cost levers built in: translation results are cached by content hash (re-runs
+and unchanged paragraphs are $0), units are grouped ~10-per-request so the
+system prompt is paid once per group, and `max_tokens` is sized from the input.
+Estimate before spending: `python src/translate_units.py <name> --estimate`
+(the 5-page sample: ≈$0.05 on Haiku 4.5, ≈$0.23 on Opus 4.8, half on batch).
+
 ## Verification
 ```bash
 python -m pytest tests/     # M4 suite: residual English, overlap, layout regression

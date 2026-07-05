@@ -82,9 +82,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("inputs", nargs="+", help="PDF paths or sample names (paper/deck)")
+    from translator import ENGINES
     ap.add_argument("--engine", default=os.environ.get("PDF_TRANSLATOR_ENGINE", "mock"),
-                    choices=["mock", "anthropic", "openai"],
-                    help="translation engine (default: mock)")
+                    choices=list(ENGINES),
+                    help="translation engine (default: mock; 'google' is free & keyless)")
     ap.add_argument("--name", help="override document name (single input only)")
     ap.add_argument("--render", action="store_true",
                     help="also render annotated layout PNGs (slower)")
