@@ -8,7 +8,7 @@
 
 import os, re, json
 
-OUT = "/home/claude/analysis"
+from config import OUT, ensure_out
 
 # ---- token protection -------------------------------------------------------
 # Patterns whose matched text must survive translation verbatim.
@@ -60,6 +60,10 @@ def restore(text, mapping):
 TRANSLATABLE = {"body", "heading", "caption", "title"}
 
 SENT_END = tuple(".!?。:;")
+
+# leading list-item markers: bullet, dash variants, middle dot, checkbox
+_BULLET_RE = re.compile(r"^\s*[•‣⁃▪●–—・·∙]\s*"
+                        r"|^\s*[-–—]\s+")
 
 FOOTER_RE = re.compile(r"(doi:|©|\u00a9|rights reserved|front matter|\d{4}-\d{3,4}|"
                        r"Corresponding author|E-mail address)", re.I)
@@ -135,6 +139,19 @@ def build_units(layout):
                 # heading/caption/title or big-font block is a hard boundary
                 if nb["type"] in ("heading", "caption", "title") or is_big(nb):
                     break
+                # Never merge across a page break on slide decks: each slide is
+                # independent, and stitching its bullets into the previous slide's
+                # unit would place them all on that page and leave this one blank.
+                cross_page = npi != ppi
+                landscape = (pages[npi]["width"] > pages[npi]["height"] or
+                             pages[ppi]["width"] > pages[ppi]["height"])
+                if cross_page and landscape:
+                    break
+                # a new list item (bullet / dash marker) is a hard boundary, so
+                # each bullet stays its own unit and keeps its original position
+                # (critical on slides; harmless on prose).
+                if _BULLET_RE.match(nb["text"]):
+                    break
                 flag_link = pb.get("continues_to_next_page") and nb.get("continues_from_prev_page")
                 if flag_link or _continues(pb["text"], nb["text"], nb["type"]):
                     parts.append((npi, nbi, nb))
@@ -164,6 +181,42 @@ def build_units(layout):
             "source": text,
         })
         i = j
+
+    # 3) cross-page fix-up. M1's continuation flags bind a page-tail block to its
+    #    continuation on the next page, but a hard-boundary unit can sit between
+    #    them in reading order (e.g. a table caption at the bottom of the column)
+    #    and break the linear merge above. Merge those flagged pairs here.
+    def blk(sid):
+        p, b = map(int, sid.split(":"))
+        return pages[p]["blocks"][b]
+
+    cont_by_page = {}
+    for u in units:
+        fb = blk(u["spans"][0])
+        if fb.get("continues_from_prev_page"):
+            cont_by_page.setdefault(int(u["spans"][0].split(":")[0]) + 1, u)
+    consumed = set()
+    for u in units:
+        if u["uid"] in consumed:
+            continue
+        while True:
+            last = blk(u["spans"][-1])
+            if not last.get("continues_to_next_page"):
+                break
+            nxt = cont_by_page.get(int(u["spans"][-1].split(":")[0]) + 2)  # 1-based next page
+            if nxt is None or nxt is u or nxt["uid"] in consumed:
+                break
+            seg = nxt["source"].lstrip()
+            u["source"] = (u["source"][:-1] + seg) if u["source"].endswith("-") \
+                else (u["source"] + " " + seg)
+            u["spans"] += nxt["spans"]
+            u["pages"] = sorted(set(u["pages"]) | set(nxt["pages"]))
+            u["cross_page"] = True
+            u["multi_block"] = True
+            consumed.add(nxt["uid"])
+    units = [u for u in units if u["uid"] not in consumed]
+    for k, u in enumerate(units):
+        u["uid"] = k
     return units
 
 # ---- glossary ---------------------------------------------------------------
@@ -181,6 +234,17 @@ DEFAULT_GLOSSARY = {
     "biofeedback": "バイオフィードバック",
 }
 
+def load_glossary():
+    """DEFAULT_GLOSSARY merged with an optional user glossary at <data>/glossary.json
+    ({'english term': '日本語'}) so terminology can be tuned without code changes."""
+    from config import DATA_DIR
+    glossary = dict(DEFAULT_GLOSSARY)
+    user_path = os.path.join(DATA_DIR, "glossary.json")
+    if os.path.exists(user_path):
+        glossary.update(json.load(open(user_path)))
+    return glossary
+
+
 def apply_glossary_hint(units, glossary):
     """Attach per-unit glossary hints (terms found in the unit) for the translator."""
     for u in units:
@@ -191,10 +255,21 @@ def apply_glossary_hint(units, glossary):
     return units
 
 if __name__ == "__main__":
-    for name in ["paper", "deck"]:
-        layout = json.load(open(f"{OUT}/{name}_layout.json"))
+    import argparse, sys
+    ap = argparse.ArgumentParser(description="M2: layout.json -> <name>_units.json")
+    ap.add_argument("names", nargs="*", default=["paper", "deck"],
+                    help="document names whose <name>_layout.json exists (default: paper deck)")
+    args = ap.parse_args()
+    ensure_out()
+    for name in args.names:
+        layout_path = f"{OUT}/{name}_layout.json"
+        if not os.path.exists(layout_path):
+            print(f"[{name}] skipped: {layout_path} not found (run m1_analyze first)",
+                  file=sys.stderr)
+            continue
+        layout = json.load(open(layout_path))
         units = build_units(layout)
-        units = apply_glossary_hint(units, DEFAULT_GLOSSARY)
+        units = apply_glossary_hint(units, load_glossary())
         # add masked text + token map per unit
         for u in units:
             masked, mapping = protect(u["source"])

@@ -2,8 +2,7 @@
 # M2 step 3: translate key deck units + build bilingual HTML preview for review.
 import json, html
 from m2_translate import restore
-
-OUT = "/home/claude/analysis"
+from config import OUT
 
 DECK_JP = {
     0: "タイトル: NASA-海軍 遠隔医療: 動揺病に対する自律訓練フィードバック練習(AFTE) 連絡先(氏名のみ): Michael Acromite",

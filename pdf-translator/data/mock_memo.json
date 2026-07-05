@@ -106,5 +106,13 @@
  {
   "prefix": "References",
   "ja": "参考文献"
+ },
+ {
+  "prefix": "∗ Corresponding author. E-mail address: ⟦T0⟧",
+  "ja": "∗ 連絡著者。E-mailアドレス: ⟦T0⟧ (J.M. Sheppard)。"
+ },
+ {
+  "prefix": "Table⟦T0⟧Assisted and normal ⟦T1⟧ jump train",
+  "ja": "表⟦T0⟧ 5週間の各トレーニング期間(アシステッドおよび通常)におけるアシステッドと通常の⟦T1⟧ジャンプトレーニング量(週あたりのセット×回数で表記)。"
  }
 ]

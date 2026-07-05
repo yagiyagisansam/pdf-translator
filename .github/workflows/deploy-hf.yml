@@ -1,0 +1,42 @@
+name: Deploy to Hugging Face Spaces
+
+# Syncs this repo to a Docker Space on every push to main (and on manual run).
+# Requires two repository secrets (set them in GitHub → Settings → Secrets →
+# Actions, all doable from a phone browser):
+#   HF_TOKEN  – a Hugging Face write token (huggingface.co → Settings → Tokens)
+#   HF_SPACE  – "<your-hf-username>/<space-name>" (create an empty Docker Space)
+# If the secrets are absent the job is skipped, so this never breaks CI.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check secrets
+        id: gate
+        run: |
+          if [ -n "${{ secrets.HF_TOKEN }}" ] && [ -n "${{ secrets.HF_SPACE }}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "HF_TOKEN / HF_SPACE not set — skipping HF deploy."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout
+        if: steps.gate.outputs.ok == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push to Hugging Face Space
+        if: steps.gate.outputs.ok == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
+        run: |
+          git config --global user.email "deploy@example.com"
+          git config --global user.name "hf-deploy"
+          git push --force "https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" \
+            HEAD:main

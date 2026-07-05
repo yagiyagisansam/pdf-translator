@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pdf-translator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Noto CJK fonts
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run pipeline on the paper sample (offline mock engine)
+        run: python src/pipeline.py paper --engine mock
+      - name: M4 verification suite
+        run: python -m pytest tests/ -v

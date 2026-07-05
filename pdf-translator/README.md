@@ -38,23 +38,62 @@ pip install -r requirements.txt
 # Noto CJK (Debian/Ubuntu): sudo apt-get install fonts-noto-cjk
 ```
 
-## Usage (current state — paths are being de-hardcoded; see CLAUDE.md task 1)
+## Web app (M5)
 ```bash
-cd src
-python m1_analyze.py            # -> analysis/<name>_layout.json (+ annotated PNGs)
-python m2_translate.py          # -> analysis/<name>_units.json
-python translate_units.py paper mock      # or: anthropic | openai
-python make_jp_font.py          # build subset JP fonts
-python m3_generate.py paper     # -> analysis/paper_ja.pdf
+python src/webapp.py    # -> http://localhost:8000
 ```
-Select a production engine with an API key:
+Upload an English PDF, watch progress, download the Japanese PDF. Each job runs
+in its own subprocess and output directory, so concurrent jobs are isolated.
+`google` (free, keyless) is the default; `gemini` needs a free Google AI Studio
+key (`GEMINI_API_KEY`); `anthropic`/`openai` need their paid keys; `mock` is the
+offline demo. Ops knobs: `PDF_TRANSLATOR_MAX_MB` (upload cap, 50),
+`PDF_TRANSLATOR_WORKERS` (parallel jobs, 2), `PDF_TRANSLATOR_JOB_TTL_H` (auto-
+delete finished jobs after N hours, 24), `PDF_TRANSLATOR_TOKEN` (if set, `/api`
+requires `Authorization: Bearer <token>`), `HOST`/`PORT`. Job metadata persists
+to disk and reloads on restart.
+
+## CLI
+One command runs the whole pipeline (M1 -> M2 -> translate -> fonts -> M3):
 ```bash
-export ANTHROPIC_API_KEY=...    # then: python translate_units.py paper anthropic
-export OPENAI_API_KEY=...       # then: python translate_units.py paper openai
+python src/pipeline.py samples/paper.pdf --engine mock   # offline demo
+python src/pipeline.py mydoc.pdf --engine anthropic      # needs ANTHROPIC_API_KEY
+python src/pipeline.py paper deck                        # sample names also work
+```
+Output lands in `analysis/` (override with `PDF_TRANSLATOR_OUT`). Individual stages
+remain runnable standalone with the same arguments:
+```bash
+python src/m1_analyze.py mydoc.pdf        # -> analysis/<name>_layout.json (+ PNGs)
+python src/m2_translate.py mydoc          # -> analysis/<name>_units.json
+python src/translate_units.py mydoc mock  # or: anthropic | openai
+python src/make_jp_font.py mydoc          # build subset JP fonts
+python src/m3_generate.py mydoc.pdf       # -> analysis/<name>_ja.pdf
+```
+Environment knobs: `PDF_TRANSLATOR_ENGINE`, `PDF_TRANSLATOR_MODEL` (default
+`claude-opus-4-8`), `PDF_TRANSLATOR_OUT`, `NOTO_CJK_REGULAR`/`NOTO_CJK_BOLD`,
+plus `data/glossary.json` for terminology overrides.
+
+## Engines & cost
+| engine | cost | notes |
+|---|---|---|
+| `google` | **free, no API key** | deep-translator -> Google web endpoint; no glossary; light/personal volume |
+| `gemini` | **free tier** | Google AI Studio (Gemini); free API key, LLM quality + glossary. Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`); model via `PDF_TRANSLATOR_GEMINI_MODEL` (default `gemini-2.0-flash`) |
+| `anthropic-batch` | 50% of API price | Message Batches API; asynchronous (minutes) - bulk documents |
+| `anthropic` / `openai` | API price | interactive latency; glossary + placeholder round-trip |
+| `mock` | free | offline demo for the bundled samples |
+
+Cost levers built in: translation results are cached by content hash (re-runs
+and unchanged paragraphs are $0), units are grouped ~10-per-request so the
+system prompt is paid once per group, and `max_tokens` is sized from the input.
+Estimate before spending: `python src/translate_units.py <name> --estimate`
+(the 5-page sample: ≈$0.05 on Haiku 4.5, ≈$0.23 on Opus 4.8, half on batch).
+
+## Verification
+```bash
+python -m pytest tests/     # M4 suite: residual English, overlap, layout regression
 ```
 
 ## Status
-M1 (layout) and M2 (translation pipeline) complete and verified. M3 (Japanese PDF
-generation) largely working: figures preserved, searchable Japanese, cross-page/column
-stitching, collision-aware placement. Remaining polish and the M4 automated checks are
-the next work — see CLAUDE.md and SPEC.md.
+M1-M3 pipeline works end to end (figures preserved, searchable Japanese,
+cross-page/column stitching, collision-aware placement) and the M4 suite is wired
+and green. Remaining work towards a finished product is prioritised in
+`docs/IMPROVEMENT_PLAN.md`; see also CLAUDE.md and SPEC.md.
