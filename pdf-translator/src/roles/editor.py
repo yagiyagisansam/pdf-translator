@@ -80,6 +80,17 @@ def _unit_lines(units, size, width, font_of):
     return out
 
 
+def _capacity(y, y_bottom, bands, lh):
+    """How many lines of height lh fit from y to y_bottom, skipping obstacles."""
+    n = 0
+    while y + lh <= y_bottom + 0.1:
+        hit = next(((t, b) for (t, b) in bands if y < b and y + lh > t), None)
+        if hit:
+            y = hit[1]; continue
+        n += 1; y += lh
+    return n
+
+
 def _flow_column(lines, x0, width, y, y_bottom, bands, lh):
     """Place lines from y downward, skipping obstacle bands. Returns
     (draws, y_end, remainder_lines)."""
@@ -144,20 +155,47 @@ def _layout_page(page, page_units, size, font_of):
                                      g["bottom"], full_obs, lh)
             draws += d; overflow += len(rem); y += lh * PARA_GAP
         else:
+            # Newspaper-style balanced two-column flow: combine BOTH lanes in
+            # reading order into one stream, fill the LEFT column top-to-bottom
+            # (skipping obstacles), then continue the overflow at the top of the
+            # RIGHT column. Without this, each lane flowed independently and the
+            # (longer) Japanese overfilled the left column while the right sat
+            # nearly empty.
             L, R = g["left"], g["right"]
-            yl = yr = y
-            if L and payload[1]:
-                lines = _unit_lines(payload[1], size, L["x1"] - L["x0"], font_of)
-                bands = _obstacles_for(page, L["x0"], L["x1"])
-                d, yl, rem = _flow_column(lines, L["x0"], L["x1"] - L["x0"], y,
-                                          g["bottom"], bands, lh)
-                draws += d; overflow += len(rem)
-            if R and payload[2]:
-                lines = _unit_lines(payload[2], size, R["x1"] - R["x0"], font_of)
-                bands = _obstacles_for(page, R["x0"], R["x1"])
-                d, yr, rem = _flow_column(lines, R["x0"], R["x1"] - R["x0"], y,
-                                          g["bottom"], bands, lh)
-                draws += d; overflow += len(rem)
+            if not (L and R):
+                # single usable column: flow everything down it
+                col = L or R
+                units = sorted(payload[1] + payload[2], key=lambda u: u["uid"])
+                w = col["x1"] - col["x0"]
+                lines = _unit_lines(units, size, w, font_of)
+                bands = _obstacles_for(page, col["x0"], col["x1"])
+                d, y, rem = _flow_column(lines, col["x0"], w, y, g["bottom"], bands, lh)
+                draws += d; overflow += len(rem); y = g["bottom"] + lh * PARA_GAP
+                continue
+            units = sorted(payload[1] + payload[2], key=lambda u: u["uid"])
+            w = min(L["x1"] - L["x0"], R["x1"] - R["x0"])   # wrap to the narrower
+            lines = _unit_lines(units, size, w, font_of)
+            Lbands = _obstacles_for(page, L["x0"], L["x1"])
+            Rbands = _obstacles_for(page, R["x0"], R["x1"])
+            Lcap = _capacity(y, g["bottom"], Lbands, lh)
+            Rcap = _capacity(y, g["bottom"], Rbands, lh)
+            # BALANCE: split by column capacity so both columns fill to roughly
+            # equal height, instead of packing the left column full and leaving
+            # the right empty. The right column may hold less (e.g. a table), so
+            # weight the split by each column's capacity.
+            total = len(lines)
+            if Lcap + Rcap > 0:
+                target_left = min(Lcap, round(total * Lcap / (Lcap + Rcap)))
+                if total - target_left > Rcap:      # push extra left if right can't hold it
+                    target_left = min(Lcap, total - Rcap)
+            else:
+                target_left = 0
+            d, yl, _ = _flow_column(lines[:target_left], L["x0"], w, y,
+                                    g["bottom"], Lbands, lh)
+            draws += d
+            d, yr, rem = _flow_column(lines[target_left:], R["x0"], w, y,
+                                      g["bottom"], Rbands, lh)
+            draws += d; overflow += len(rem)
             y = max(yl, yr) + lh * PARA_GAP
     for d in draws:
         d["size"] = size
