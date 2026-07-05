@@ -7,6 +7,8 @@ fontTools>=4.50
 Pillow>=10.0
 # Free keyless translation engine
 deep-translator>=1.11
+# HTTP client (Gemini REST engine + optional Supabase Storage backend)
+requests>=2.31
 # Web app (M5)
 fastapi>=0.110
 uvicorn>=0.29

@@ -16,3 +16,13 @@ services:
       # Leave empty to let anyone with the URL use it.
       - key: PDF_TRANSLATOR_TOKEN
         sync: false
+      # Optional Supabase Storage backend: keeps translated PDFs even across
+      # REDEPLOYS (Render's free disk is wiped on each deploy). Set URL + KEY
+      # from your Supabase project (Settings -> API -> service_role key). Leave
+      # unset = local disk only. Free tier gives 1 GB. See docs/DEPLOY.md.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: translations
