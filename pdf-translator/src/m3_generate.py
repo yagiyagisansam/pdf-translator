@@ -79,14 +79,30 @@ def _norm_txt_drop(s):
         s = s.replace(k, "")
     return "".join(ch.lower() for ch in s if ch.isascii() and ch.isalnum())
 
-def _matches_blob(op_norm, blob, blob_drop=None, op_norm_drop=None):
+_DIGIT_RE = re.compile(r"\d")
+
+def _matches_blob(op_norm, blob, blob_drop=None, op_norm_drop=None,
+                  blob_nodigit=None):
     """Kill an op if its normalized text is a substring of the translated-block
     blob, under either the expand-ligatures or the drop-ligatures normalization.
-    Short ops (<3 chars) are only handled by the fragment pass."""
+    Short ops (<3 chars) are only handled by the fragment pass.
+
+    A third, digit-stripped pass handles superscript citations that the
+    extractor interleaved INTO a word: the block text becomes garbled like
+    "vol-umes2o2f7ju29mping" (the "20,27-29" cite woven through the letters),
+    which the clean content-stream op "umesofjumping" can't match directly.
+    Dropping digits from BOTH sides collapses the woven cite and restores the
+    match. References carry the digits but are excluded from the blob, so this
+    cannot spuriously delete reference text."""
     if len(op_norm) >= 3 and op_norm in blob:
         return True
     if blob_drop is not None and op_norm_drop and len(op_norm_drop) >= 3:
-        return op_norm_drop in blob_drop
+        if op_norm_drop in blob_drop:
+            return True
+    if blob_nodigit is not None:
+        op_nd = _DIGIT_RE.sub("", op_norm)
+        if len(op_nd) >= 4 and op_nd in blob_nodigit:
+            return True
     return False
 
 def _op_text(op):
@@ -203,6 +219,7 @@ def remove_text_by_content(page, owner, kill_blob, **kwargs):
             font emitted as separate tiny ops. Running heads, page numbers and table
             text are NOT surrounded by dropped body text, so they are preserved."""
     blob_drop = kwargs.get("kill_blob_drop")
+    blob_nodigit = _DIGIT_RE.sub("", kill_blob)
     decoders = _page_font_decoders(page)
     ops = list(parse_content_stream(page))
     is_text=[False]*len(ops); dropped=[False]*len(ops)
@@ -220,19 +237,37 @@ def remove_text_by_content(page, owner, kill_blob, **kwargs):
             t=uni if uni is not None else _op_text(op)
             op_uni[i]=t
             if _matches_blob(_norm_txt(t), kill_blob,
-                             blob_drop, _norm_txt_drop(t)):
+                             blob_drop, _norm_txt_drop(t),
+                             blob_nodigit=blob_nodigit):
                 dropped[i]=True
     text_idx=[i for i in range(len(ops)) if is_text[i]]
     pos={idx:k for k,idx in enumerate(text_idx)}
+
+    def _is_frag(idx):
+        """A short stray fragment: <=3 normalized chars, or matches _FRAG_RE
+        (citation numbers, stat labels p/ES, affiliation a-d, symbols)."""
+        raw=(op_uni[idx] if op_uni[idx] is not None else _op_text(ops[idx])).strip()
+        if not raw: return True   # empty/whitespace op flows with its neighbours
+        raw_sep=_expand_ligatures(raw)
+        norm=_norm_txt(raw)
+        return len(norm)<=3 or bool(_FRAG_RE.match(raw_sep))
+
     for i in text_idx:
         if dropped[i]: continue
-        raw=(op_uni[i] if op_uni[i] is not None else _op_text(ops[i])).strip()
-        raw_sep=_expand_ligatures(raw)   # turns the Œ-dash into '-', etc.
-        norm=_norm_txt(raw)
-        if len(norm)>3 and not _FRAG_RE.match(raw_sep): continue
+        if not _is_frag(i): continue
         k=pos[i]
-        prevd = k-1>=0 and dropped[text_idx[k-1]]
-        nextd = k+1<len(text_idx) and dropped[text_idx[k+1]]
+        # Scan left/right SKIPPING over consecutive fragment ops to the nearest
+        # NON-fragment text op. Drop this fragment only if the body text bounding
+        # its run was itself dropped on BOTH sides - i.e. it is wedged inside a
+        # translated paragraph. Runs of fragments (e.g. "a,b,c,d" author markers,
+        # "1-3" citations) are killed together; running heads / page numbers,
+        # bounded by surviving text, are preserved.
+        l=k-1
+        while l>=0 and _is_frag(text_idx[l]): l-=1
+        prevd = l>=0 and dropped[text_idx[l]]
+        r=k+1
+        while r<len(text_idx) and _is_frag(text_idx[r]): r+=1
+        nextd = r<len(text_idx) and dropped[text_idx[r]]
         if prevd and nextd:
             dropped[i]=True
     out=[op for i,op in enumerate(ops) if not dropped[i]]
