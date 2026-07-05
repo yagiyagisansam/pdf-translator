@@ -71,6 +71,13 @@ def lanes_for_page(page):
                 obstacles.append((b["top"], b["bottom"], b["type"]))
         lanes[lane] = {"x0": x0, "x1": x1, "top": top, "bottom": text_bottom,
                        "obstacles": obstacles}
+    # Clamp left/right column x-ranges so they never overlap: a block that
+    # spilled slightly past the gutter can otherwise widen one lane into the
+    # other's territory, and reflow would collide the two columns' text.
+    if 1 in lanes and 2 in lanes and lanes[1]["x1"] > lanes[2]["x0"]:
+        gutter = (lanes[1]["x1"] + lanes[2]["x0"]) / 2
+        lanes[1]["x1"] = min(lanes[1]["x1"], gutter - 3)
+        lanes[2]["x0"] = max(lanes[2]["x0"], gutter + 3)
     return lanes
 
 

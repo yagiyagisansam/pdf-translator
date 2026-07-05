@@ -30,25 +30,28 @@ def load_label_font(sz):
 
 def _cluster_rows(chars):
     """Group y-sorted chars into visual rows. A char joins the current row when its
-    vertical span overlaps the row's span by at least half of the SMALLER of the
-    char's height and the row's tallest char height (so raised superscripts still
-    join their base line). The previous running-mean-center rule drifted across
-    adjacent lines of different font sizes and interleaved their text char-by-char
-    (e.g. a small 'Table 1' line swallowed the caption line below it)."""
+    vertical CENTER is within 0.6x the (smaller) char height of the row's median
+    center. The reference is the row's MEDIAN center - stable within a line - not
+    an accumulated bounding box, so tight line spacing can't chain successive
+    lines into one giant row (which would interleave their characters by x when
+    sorted). Different-size adjacent lines still separate (their centers differ by
+    more than the tolerance), and raised superscripts still join their base line
+    (their center stays within tolerance)."""
+    import statistics as _st
     rows = []
     cur = [chars[0]]
-    cur_top, cur_bot = chars[0]["top"], chars[0]["bottom"]
-    cur_maxh = cur_bot - cur_top
+    cy = (chars[0]["top"] + chars[0]["bottom"]) / 2
+    ch_med = chars[0]["bottom"] - chars[0]["top"]
     for c in chars[1:]:
-        ch = c["bottom"] - c["top"]
-        ov = min(cur_bot, c["bottom"]) - max(cur_top, c["top"])
-        if ov >= 0.5 * min(ch, cur_maxh):
+        c_cy = (c["top"] + c["bottom"]) / 2
+        h = min(ch_med, c["bottom"] - c["top"]) or ch_med
+        if abs(c_cy - cy) <= 0.6 * h:
             cur.append(c)
-            cur_top = min(cur_top, c["top"]); cur_bot = max(cur_bot, c["bottom"])
-            cur_maxh = max(cur_maxh, ch)
+            cy = _st.median((x["top"] + x["bottom"]) / 2 for x in cur)
+            ch_med = _st.median(x["bottom"] - x["top"] for x in cur)
         else:
             rows.append(cur)
-            cur = [c]; cur_top, cur_bot = c["top"], c["bottom"]; cur_maxh = ch
+            cur = [c]; cy = c_cy; ch_med = c["bottom"] - c["top"]
     rows.append(cur)
     return rows
 

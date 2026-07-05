@@ -812,17 +812,95 @@
     },
     {
      "col": 1,
-     "x0": 92.75084436,
-     "x1": 331.8651345199999,
+     "x0": 92.7509,
+     "x1": 331.85628877999994,
      "top": 23.235484199999973,
-     "bottom": 427.71860420000013,
-     "text": "this study, the assisted jumps were performed with a 10 kg reduced eccentric and concentric load. The reduction in eccentric load may have reduced muscle activation and reduced the peak force,7,17 a contributing factor to pre-stretch augmentation in a counter-movement task.15,17–19 It is pos- sible that performing assisted jumps in conjunction with a situation where the athlete drops a load at the bottom of the counter-movement20,21 or performing a drop from a height17,22–26 (in an effort to normalize or increase the eccen- tric demand to that of normal jumping) may result in even greater adaptation and gains in jump height. Considering the athletic population recruited for this study (male volleyball players), were already performing large vol- umesofjumpingintheirdailytrainingenvironmentandgame play,2,27–29 it is logical that the normal jump condition did not elicit gains in jump height. The athletes in this study were participating in a ‘full time’ volleyball program that included 7–10 volleyball sessions, and 3 strength and conditioning ses- sions per week. As such it is likely that the trainable aspects developed through normal jump training would have already been well developed, thereby limiting the potential for fur- theradaptationtooccurusingthistrainingmethod.Incontrast the novel stimulus of assisted jumping resulted in improved jump height, whereas additional jumping under normal con- ditions did not. This is consistent with previous work that demonstrates improvements in jump height when a partic- ularly novel stimulus is used, but no additional beneﬁt in simply adding more counter-movement jumps.21–23 It may be that assisted jumping is a useful tool, but possibly only when combined with traditional strength and conditioning activities. This observation is in agreement with plyometric training studies that indicate gains in vertical jump through plyometrics are superior when combined with other strength and conditioning activity.23,30",
+     "bottom": 57.10832419999997,
+     "text": "this study, the assisted jumps were performed with a 10 kg reduced eccentric and concentric load. The reduction in eccentric load may have reduced muscle activation and",
      "size": 10.0,
      "bold": false,
-     "nlines": 34,
+     "nlines": 3,
      "type": "body",
      "order": 3,
      "continues_from_prev_page": true
+    },
+    {
+     "col": 1,
+     "x0": 92.7509,
+     "x1": 196.5229,
+     "top": 57.3567372,
+     "bottom": 69.06344419999994,
+     "text": "7,17 reduced the peak force,",
+     "size": 8.8,
+     "bold": false,
+     "nlines": 2,
+     "type": "body",
+     "order": 4
+    },
+    {
+     "col": 1,
+     "x0": 92.75145274,
+     "x1": 331.85688912,
+     "top": 59.10098419999997,
+     "bottom": 116.88428420000002,
+     "text": "a contributing factor to pre-stretch augmentation in a counter-movement task.15,17–19 It is pos- sible that performing assisted jumps in conjunction with a situation where the athlete drops a load at the bottom of the counter-movement20,21 or performing a drop from a",
+     "size": 10.0,
+     "bold": false,
+     "nlines": 5,
+     "type": "body",
+     "order": 5
+    },
+    {
+     "col": 1,
+     "x0": 92.75157744000002,
+     "x1": 146.0514,
+     "top": 117.13263719999998,
+     "bottom": 128.8394042,
+     "text": "17,22–26 height",
+     "size": 8.8,
+     "bold": false,
+     "nlines": 2,
+     "type": "body",
+     "order": 6
+    },
+    {
+     "col": 1,
+     "x0": 92.75084436,
+     "x1": 331.86021818000006,
+     "top": 118.87688419999995,
+     "bottom": 200.5702041999998,
+     "text": "(in an effort to normalize or increase the eccen- tric demand to that of normal jumping) may result in even greater adaptation and gains in jump height. Considering the athletic population recruited for this study (male volleyball players), were already performing large vol- umes2o,2f7–ju29mpingintheirdailytrainingenvironmentandgame play,",
+     "size": 10.0,
+     "bold": false,
+     "nlines": 7,
+     "type": "body",
+     "order": 7
+    },
+    {
+     "col": 1,
+     "x0": 92.7513744,
+     "x1": 331.8651345199999,
+     "top": 190.60798419999992,
+     "bottom": 415.7634842000001,
+     "text": "it is logical that the normal jump condition did not elicit gains in jump height. The athletes in this study were participating in a ‘full time’ volleyball program that included 7–10 volleyball sessions, and 3 strength and conditioning ses- sions per week. As such it is likely that the trainable aspects developed through normal jump training would have already been well developed, thereby limiting the potential for fur- theradaptationtooccurusingthistrainingmethod.Incontrast the novel stimulus of assisted jumping resulted in improved jump height, whereas additional jumping under normal con- ditions did not. This is consistent with previous work that demonstrates improvements in jump height when a partic- ularly novel stimulus is used, but no additional beneﬁt in simply adding more counter-movement jumps.21–23 It may be that assisted jumping is a useful tool, but possibly only when combined with traditional strength and conditioning activities. This observation is in agreement with plyometric training studies that indicate gains in vertical jump through plyometrics are superior when combined with other strength",
+     "size": 10.0,
+     "bold": false,
+     "nlines": 19,
+     "type": "body",
+     "order": 8
+    },
+    {
+     "col": 1,
+     "x0": 92.75177565999996,
+     "x1": 211.0087,
+     "top": 416.0121372,
+     "bottom": 427.71860420000013,
+     "text": "23,30 and conditioning activity.",
+     "size": 8.8,
+     "bold": false,
+     "nlines": 2,
+     "type": "body",
+     "order": 9
     },
     {
      "col": 1,
@@ -835,7 +913,7 @@
      "bold": true,
      "nlines": 1,
      "type": "heading",
-     "order": 4
+     "order": 10
     },
     {
      "col": 1,
@@ -848,7 +926,7 @@
      "bold": false,
      "nlines": 4,
      "type": "body",
-     "order": 5
+     "order": 11
     },
     {
      "col": 1,
@@ -861,7 +939,7 @@
      "bold": true,
      "nlines": 1,
      "type": "heading",
-     "order": 6
+     "order": 12
     },
     {
      "col": 1,
@@ -874,7 +952,7 @@
      "bold": false,
      "nlines": 4,
      "type": "body",
-     "order": 7
+     "order": 13
     },
     {
      "col": 1,
@@ -887,7 +965,7 @@
      "bold": true,
      "nlines": 1,
      "type": "heading",
-     "order": 8
+     "order": 14
     },
     {
      "col": 1,
@@ -900,7 +978,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 9
+     "order": 15
     },
     {
      "col": 2,
@@ -913,7 +991,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 10
+     "order": 16
     },
     {
      "col": 2,
@@ -921,12 +999,12 @@
      "x1": 594.8648482199999,
      "top": 54.68408968999984,
      "bottom": 82.57943968999984,
-     "text": "3. SanhdeprpeapredatJeMd ,efBfoorrtgseianudeliRte. Ivnoﬂllueeynbcaellopflasytaetrusr.eJoAnusmtoSvteremnegntht sCpoenedd 2008;16(3):12–4.",
+     "text": "3. Sheppard JM, Borgeaud R. Inﬂuence of stature on movement speed and repeated efforts in elite volleyball players. J Aust Strength Cond 2008;16(3):12–4.",
      "size": 8.0,
      "bold": false,
-     "nlines": 2,
+     "nlines": 3,
      "type": "reference",
-     "order": 11
+     "order": 17
     },
     {
      "col": 2,
@@ -939,7 +1017,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 12
+     "order": 18
     },
     {
      "col": 2,
@@ -947,12 +1025,12 @@
      "x1": 594.8672392499998,
      "top": 114.45983968999985,
      "bottom": 152.31781468999986,
-     "text": "5. Nbaelwlistotinc RreUsi,sRtaongceerstraRiAni,nVgoaltekthJeSe,nedt aolf. Fseoausrowneaetktesnoufatoepstidmecallinloinadg jump performance of women volleyball players. J Strength Cond Res 2006;20:955–61.",
+     "text": "5. Newton RU, Rogers RA, Volek JS, et al. Four weeks of optimal load ballistic resistance training at the end of season attenuates declining jump performance of women volleyball players. J Strength Cond Res 2006;20:955–61.",
      "size": 8.0,
      "bold": false,
-     "nlines": 3,
+     "nlines": 4,
      "type": "reference",
-     "order": 13
+     "order": 19
     },
     {
      "col": 2,
@@ -965,7 +1043,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 14
+     "order": 20
     },
     {
      "col": 2,
@@ -978,7 +1056,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 15
+     "order": 21
     },
     {
      "col": 2,
@@ -991,7 +1069,7 @@
      "bold": false,
      "nlines": 4,
      "type": "reference",
-     "order": 16
+     "order": 22
     },
     {
      "col": 2,
@@ -1004,7 +1082,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 17
+     "order": 23
     },
     {
      "col": 2,
@@ -1017,7 +1095,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 18
+     "order": 24
     },
     {
      "col": 2,
@@ -1030,7 +1108,7 @@
      "bold": false,
      "nlines": 2,
      "type": "reference",
-     "order": 19
+     "order": 25
     },
     {
      "col": 2,
@@ -1043,7 +1121,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 20
+     "order": 26
     },
     {
      "col": 2,
@@ -1056,7 +1134,7 @@
      "bold": false,
      "nlines": 4,
      "type": "reference",
-     "order": 21
+     "order": 27
     },
     {
      "col": 2,
@@ -1064,12 +1142,12 @@
      "x1": 594.8696302799992,
      "top": 403.37596468999993,
      "bottom": 431.27131468999994,
-     "text": "14. Osternig LR, Hamill J, Lander JE, et al. Co-activiation of sprinter and 1d9is8ta6n;1c8e:4ru2n1n–e3r5m. uscles in isokinetic exercise. Med Sci Sports Exerc",
+     "text": "14. Osternig LR, Hamill J, Lander JE, et al. Co-activiation of sprinter and distance runner muscles in isokinetic exercise. Med Sci Sports Exerc 1986;18:421–35.",
      "size": 8.0,
      "bold": false,
-     "nlines": 2,
+     "nlines": 3,
      "type": "reference",
-     "order": 22
+     "order": 28
     },
     {
      "col": 2,
@@ -1082,7 +1160,7 @@
      "bold": false,
      "nlines": 2,
      "type": "reference",
-     "order": 23
+     "order": 29
     },
     {
      "col": 2,
@@ -1095,7 +1173,7 @@
      "bold": false,
      "nlines": 2,
      "type": "reference",
-     "order": 24
+     "order": 30
     },
     {
      "col": 2,
@@ -1108,7 +1186,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 25
+     "order": 31
     },
     {
      "col": 2,
@@ -1121,7 +1199,7 @@
      "bold": false,
      "nlines": 2,
      "type": "reference",
-     "order": 26
+     "order": 32
     },
     {
      "col": 2,
@@ -1134,7 +1212,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 27
+     "order": 33
     },
     {
      "col": 2,
@@ -1147,7 +1225,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 28
+     "order": 34
     },
     {
      "col": 2,
@@ -1160,7 +1238,7 @@
      "bold": false,
      "nlines": 4,
      "type": "reference",
-     "order": 29
+     "order": 35
     },
     {
      "col": 2,
@@ -1173,7 +1251,7 @@
      "bold": false,
      "nlines": 3,
      "type": "reference",
-     "order": 30
+     "order": 36
     },
     {
      "col": 2,
@@ -1186,7 +1264,7 @@
      "bold": false,
      "nlines": 4,
      "type": "reference",
-     "order": 31
+     "order": 37
     }
    ],
    "figures": []
