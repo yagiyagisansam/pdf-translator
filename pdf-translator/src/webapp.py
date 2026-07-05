@@ -102,6 +102,10 @@ def _auth_ok(request):
 
 @app.middleware("http")
 async def _auth_middleware(request, call_next):
+    # /healthz is the always-open keep-alive/health endpoint (no login), so an
+    # uptime pinger can hit it to stop the free host from idling.
+    if request.url.path == "/healthz":
+        return await call_next(request)
     # Whole-site gate: when a password is set, the page AND the API require it,
     # so the browser shows a login prompt and only you can open the app.
     if not _auth_ok(request):
@@ -323,6 +327,12 @@ $('go').onclick=async()=>{
   $('go').disabled=false;
 };
 </script></body></html>"""
+
+
+@app.get("/healthz")
+def healthz():
+    # Cheap, auth-free liveness endpoint used by the keep-alive pinger.
+    return {"status": "ok"}
 
 
 @app.get("/", response_class=HTMLResponse)
