@@ -1,0 +1,9 @@
+**/__pycache__/
+**/*.pyc
+**/.venv/
+**/analysis/
+**/webjobs/
+**/*_ja.pdf
+**/*_stripped.pdf
+**/*_overlay.pdf
+.git/

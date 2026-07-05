@@ -1,0 +1,16 @@
+# Render.com Blueprint - deploy the translator web app straight from GitHub.
+# On render.com: New -> Blueprint -> pick this repo -> Apply. Free plan, no card.
+services:
+  - type: web
+    name: pdf-en-ja-translator
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      # Optional: set a Gemini key here to enable the free-tier LLM engine for
+      # everyone, or leave unset and paste the key per-job in the web UI.
+      - key: GEMINI_API_KEY
+        sync: false
+      # Optional: require this token on /api if you want the app private.
+      - key: PDF_TRANSLATOR_TOKEN
+        sync: false
