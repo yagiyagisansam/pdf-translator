@@ -56,18 +56,34 @@ def _expand_ligatures(s):
             s = s.replace(k, v)
     return s
 
+# Ligature glyphs some fonts REUSE as quotation marks (ﬁ/ﬂ around a phrase). For
+# those the expand-to-"fi"/"fl" normalization corrupts the match, so we also try a
+# variant that DROPS them. A word like "signiﬁcant" (a real ligature) matches on
+# the expand form; "ﬁerectile dysfunctionﬂ" (quote abuse) matches on the drop form.
+_AMBIG_LIG = ("ﬁ", "ﬂ", "ﬀ", "ﬃ", "ﬄ", "˚", "˜")
+
 def _norm_txt(s):
     # Expand known ligature glyphs, then keep only alphanumerics, lowercased.
     s = _expand_ligatures(s)
     return "".join(ch.lower() for ch in s if ch.isalnum())
 
-def _matches_blob(op_norm, blob):
-    """Kill an op if its normalized text is a substring of the translated-block blob.
-    Ligatures are already expanded in _norm_txt, so plain containment is reliable.
+def _norm_txt_drop(s):
+    # Same, but drop the ambiguous ligature/quote glyphs instead of expanding.
+    for k, v in _SEPARATORS.items():
+        s = s.replace(k, v)
+    for k in _AMBIG_LIG:
+        s = s.replace(k, "")
+    return "".join(ch.lower() for ch in s if ch.isalnum())
+
+def _matches_blob(op_norm, blob, blob_drop=None, op_norm_drop=None):
+    """Kill an op if its normalized text is a substring of the translated-block
+    blob, under either the expand-ligatures or the drop-ligatures normalization.
     Short ops (<3 chars) are only handled by the fragment pass."""
-    if len(op_norm) < 3:
-        return False
-    return op_norm in blob
+    if len(op_norm) >= 3 and op_norm in blob:
+        return True
+    if blob_drop is not None and op_norm_drop and len(op_norm_drop) >= 3:
+        return op_norm_drop in blob_drop
+    return False
 
 def _op_text(op):
     o = str(op.operator); a = op.operands
@@ -93,7 +109,87 @@ _FRAG_RE = re.compile(
     r"^(?:[a-d]|p|t|n|es|no|to|of|in|the|and|or|vs|"
     r"\d{1,4}|\d{1,3}[-–,]\d{1,3}|[±×<>=]+)$", re.I)
 
-def remove_text_by_content(page, owner, kill_blob):
+def _parse_tounicode(data):
+    """Parse a /ToUnicode CMap stream into {code:int -> unicode:str}. Handles the
+    common bfchar / bfrange forms; unknown constructs are skipped."""
+    text = data.decode("latin-1", "replace")
+    mp = {}
+
+    def _u(hexstr):
+        b = bytes.fromhex(hexstr)
+        try:
+            return b.decode("utf-16-be")
+        except Exception:
+            return ""
+
+    for block in re.findall(r"beginbfchar(.*?)endbfchar", text, re.S):
+        for src, dst in re.findall(r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", block):
+            mp[int(src, 16)] = _u(dst)
+    for block in re.findall(r"beginbfrange(.*?)endbfrange", text, re.S):
+        # <lo> <hi> <dststart>
+        for lo, hi, ds in re.findall(
+                r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>", block):
+            a, b = int(lo, 16), int(hi, 16)
+            base = int(ds, 16)
+            for k in range(a, b + 1):
+                mp[k] = chr(base + (k - a)) if base + (k - a) < 0x110000 else ""
+        # <lo> <hi> [<d0> <d1> ...]
+        for lo, hi, arr in re.findall(
+                r"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*\[(.*?)\]", block, re.S):
+            a = int(lo, 16)
+            dsts = re.findall(r"<([0-9A-Fa-f]+)>", arr)
+            for off, d in enumerate(dsts):
+                mp[a + off] = _u(d)
+    return mp
+
+
+def _page_font_decoders(page):
+    """Return {font_name(str) -> (bytes_per_code:int, {code->unicode})} for fonts
+    on the page that carry a /ToUnicode map. Fonts without one are omitted, and
+    ops in them fall back to raw-byte matching (works for standard encodings)."""
+    decoders = {}
+    try:
+        fonts = page.Resources.Font
+    except Exception:
+        return decoders
+    for name, font in fonts.items():
+        try:
+            tu = font.get("/ToUnicode")
+            if tu is None:
+                continue
+            width = 2 if str(font.get("/Subtype", "")) == "/Type0" else 1
+            decoders[str(name)] = (width, _parse_tounicode(tu.read_bytes()))
+        except Exception:
+            continue
+    return decoders
+
+
+def _decode_op(op, cur_font, decoders):
+    """Unicode text of a text-show op under the current font's ToUnicode map,
+    or None if that font has no decoder (caller falls back to raw bytes)."""
+    dec = decoders.get(cur_font)
+    if dec is None:
+        return None
+    width, mp = dec
+    out = []
+    a = op.operands
+    o = str(op.operator)
+    strings = []
+    if o == "TJ":
+        strings = [el for el in a[0] if isinstance(el, pikepdf.String)]
+    elif o == "Tj":
+        strings = [a[0]]
+    elif o in ("'", '"'):
+        strings = [a[-1]] if a else []
+    for s in strings:
+        raw = bytes(s)
+        for i in range(0, len(raw), width):
+            code = int.from_bytes(raw[i:i + width], "big")
+            out.append(mp.get(code, ""))
+    return "".join(out)
+
+
+def remove_text_by_content(page, owner, kill_blob, **kwargs):
     """Two-pass, coordinate-free English removal.
     Pass 1: drop any text-show op whose normalized text is inside kill_blob (the
             concatenated text of translated blocks).
@@ -102,18 +198,31 @@ def remove_text_by_content(page, owner, kill_blob):
             dropped body ops in stream order - pieces of a translated paragraph the
             font emitted as separate tiny ops. Running heads, page numbers and table
             text are NOT surrounded by dropped body text, so they are preserved."""
+    blob_drop = kwargs.get("kill_blob_drop")
+    decoders = _page_font_decoders(page)
     ops = list(parse_content_stream(page))
     is_text=[False]*len(ops); dropped=[False]*len(ops)
+    op_uni=[None]*len(ops)   # decoded Unicode text per text op (for the frag pass)
+    cur_font=None
     for i,op in enumerate(ops):
-        if str(op.operator) in ("Tj","TJ","'",'"'):
+        o=str(op.operator)
+        if o=="Tf" and op.operands:
+            cur_font=str(op.operands[0])
+            continue
+        if o in ("Tj","TJ","'",'"'):
             is_text[i]=True
-            if _matches_blob(_norm_txt(_op_text(op)), kill_blob):
+            # decode via the font's ToUnicode (subsetted fonts); else raw bytes
+            uni=_decode_op(op, cur_font, decoders)
+            t=uni if uni is not None else _op_text(op)
+            op_uni[i]=t
+            if _matches_blob(_norm_txt(t), kill_blob,
+                             blob_drop, _norm_txt_drop(t)):
                 dropped[i]=True
     text_idx=[i for i in range(len(ops)) if is_text[i]]
     pos={idx:k for k,idx in enumerate(text_idx)}
     for i in text_idx:
         if dropped[i]: continue
-        raw=_op_text(ops[i]).strip()
+        raw=(op_uni[i] if op_uni[i] is not None else _op_text(ops[i])).strip()
         raw_sep=_expand_ligatures(raw)   # turns the Œ-dash into '-', etc.
         norm=_norm_txt(raw)
         if len(norm)>3 and not _FRAG_RE.match(raw_sep): continue
@@ -285,6 +394,7 @@ def generate(name, src_path):
     # Per page, the concatenated normalized text of all TRANSLATED blocks.
     # The content-based kill removes any text-show op whose text is part of this blob.
     kill_blob = {pi: "" for pi in range(len(layout["pages"]))}
+    kill_blob_drop = {pi: "" for pi in range(len(layout["pages"]))}
     unit_regions = {}   # uid -> (unit, regions)
     for pi, p in enumerate(layout["pages"]):
         for bi, b in enumerate(p["blocks"]):
@@ -295,6 +405,7 @@ def generate(name, src_path):
             if not u:
                 continue
             kill_blob[pi] += _norm_txt(b["text"])
+            kill_blob_drop[pi] += _norm_txt_drop(b["text"])
 
     for u in units:
         if not u.get("target"):
@@ -356,7 +467,8 @@ def generate(name, src_path):
     pdf=Pdf.open(src_path)
     for pi,page in enumerate(pdf.pages):
         if kill_blob.get(pi):
-            remove_text_by_content(page, pdf, kill_blob[pi])
+            remove_text_by_content(page, pdf, kill_blob[pi],
+                                   kill_blob_drop=kill_blob_drop[pi])
     stripped=f"{OUT}/{name}_stripped.pdf"; pdf.save(stripped); pdf.close()
 
     # 2) overlay - flow each unit across its regions

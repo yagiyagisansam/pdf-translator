@@ -25,34 +25,40 @@ app = FastAPI(title="PDF EN→JA Translator")
 JOBS = {}  # job_id -> {status, stage, error, result, filename, created}
 _slots = threading.Semaphore(MAX_PARALLEL)
 
-STAGE_LABELS = {
-    "M1": "レイアウト解析中",
-    "M2": "翻訳ユニット構築中",
-    "translate": "翻訳中",
-    "subset": "フォント生成中",
-    "M3": "日本語PDF生成中",
+# The orchestrator prints "  [<role>] <detail>" per step.
+ROLE_LABELS = {
+    "producer": "PDF製作者: レイアウト解析中",
+    "translator": "翻訳者: 翻訳中",
+    "editor": "編集者: 配置中",
+    "qa": "確認者: 検査中",
+    "done": "完了処理中",
 }
+_STAGE_RE = re.compile(r"\[(producer|translator|editor|qa|done)\]\s*(.*)")
 
 
 def _stage_label(line):
-    for key, label in STAGE_LABELS.items():
-        if key in line:
-            return label
-    return None
+    m = _STAGE_RE.search(line)
+    if not m:
+        return None
+    role, detail = m.group(1), m.group(2).strip()
+    base = ROLE_LABELS.get(role, role)
+    return f"{base}（{detail}）" if detail else base
 
 
 def _run_job(job_id):
     job = JOBS[job_id]
     out_dir = os.path.join(JOBS_DIR, job_id)
     env = dict(os.environ, PDF_TRANSLATOR_OUT=out_dir)
-    cmd = [sys.executable, os.path.join(ROOT, "src", "pipeline.py"),
+    # 4-role orchestrator: producer -> translator -> editor -> qa (retry loop)
+    cmd = [sys.executable, "-m", "roles.orchestrator",
            os.path.join(out_dir, "input.pdf"), "--name", "doc",
            "--engine", job["engine"]]
     tail = []
     with _slots:
         job["status"] = "running"
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True, env=env)
+                                stderr=subprocess.STDOUT, text=True, env=env,
+                                cwd=os.path.join(ROOT, "src"))
         for line in proc.stdout:
             line = line.rstrip()
             tail = (tail + [line])[-8:]

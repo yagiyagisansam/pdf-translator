@@ -19,3 +19,8 @@ NotoJP*.ttf
 
 # Golden files are committed on purpose
 !tests/golden/*.json
+_placed.json
+_stripped.pdf
+_overlay.pdf
+translation_cache.json
+webjobs/

@@ -28,6 +28,13 @@ def ensure_out():
     return OUT
 
 
+def make_jp_font_for(name):
+    """Subset the embedding JP fonts to the characters used by <name>'s
+    translations. Thin wrapper so callers don't import make_jp_font directly."""
+    import make_jp_font
+    make_jp_font.make_fonts([name])
+
+
 def resolve_pdf(name_or_path):
     """Accept either a sample name ('paper') or a filesystem path to a PDF.
     Returns (pdf_path, name)."""
