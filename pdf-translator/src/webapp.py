@@ -33,7 +33,7 @@ JOBS_DIR = os.environ.get("PDF_TRANSLATOR_JOBS",
                           os.path.join(ROOT, "analysis", "webjobs"))
 MAX_UPLOAD_MB = int(os.environ.get("PDF_TRANSLATOR_MAX_MB", "50"))
 MAX_PARALLEL = int(os.environ.get("PDF_TRANSLATOR_WORKERS", "2"))
-JOB_TTL_H = float(os.environ.get("PDF_TRANSLATOR_JOB_TTL_H", "24"))
+JOB_TTL_H = float(os.environ.get("PDF_TRANSLATOR_JOB_TTL_H", "168"))
 AUTH_TOKEN = os.environ.get("PDF_TRANSLATOR_TOKEN")
 
 app = FastAPI(title="PDF EN→JA Translator")
@@ -209,6 +209,29 @@ async def create_job(request: Request, file: UploadFile = File(...),
     return {"id": job_id}
 
 
+@app.get("/api/jobs")
+def list_jobs(request: Request):
+    """Recent jobs (newest first) so the page can show a history and finished
+    files stay reachable after a reload or a re-login - the browser no longer
+    needs to have remembered the job id. Only reachable behind the site
+    password, so in "only me" mode this is your private list."""
+    items = []
+    for jid, job in JOBS.items():
+        result = job.get("result") or os.path.join(JOBS_DIR, jid, "doc_ja.pdf")
+        items.append({
+            "id": jid,
+            "filename": job.get("filename") or "document.pdf",
+            "status": job.get("status"),
+            "stage": job.get("stage"),
+            "error": job.get("error"),
+            "engine": job.get("engine"),
+            "created": job.get("created", 0),
+            "available": job.get("status") == "done" and os.path.exists(result),
+        })
+    items.sort(key=lambda j: j["created"], reverse=True)
+    return {"jobs": items[:50]}
+
+
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str, request: Request):
     job = JOBS.get(job_id)
@@ -266,6 +289,12 @@ button:disabled{opacity:.5;cursor:default}
 .err{color:#dc2626;white-space:pre-wrap}
 a.dl{display:inline-block;margin-top:8px;font-weight:bold}
 small{color:#888}
+.hitem{display:flex;justify-content:space-between;align-items:center;gap:10px;
+       padding:8px 0;border-top:1px solid #8883}
+.hitem:first-child{border-top:0}
+.hname{font-size:14px;word-break:break-all}
+.hmeta{font-size:12px;color:#888}
+.hitem a{white-space:nowrap;font-weight:bold}
 </style></head><body>
 <h1>PDF 英日翻訳(レイアウト保持)</h1>
 <p>英語のPDF(論文・スライド)をアップロードすると、図表の位置を保持したまま
@@ -292,9 +321,43 @@ small{color:#888}
   <button id="go">翻訳する</button>
   <div id="status"></div>
 </div>
+<div class="card">
+  <h2 style="font-size:17px;margin:0 0 4px">保存された翻訳</h2>
+  <p style="margin:0"><small>過去の翻訳結果は約__TTL__日間サーバに保存され、ここから
+  再ダウンロードできます。ログインが切れて開き直した場合も、ここに残ります。</small></p>
+  <div id="history" style="margin-top:12px">
+    <small>読み込み中…</small>
+  </div>
+</div>
 <p><small>暗号化PDF・テキスト層のないスキャンPDFは未対応です。</small></p>
 <script>
 const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmtDate=ts=>{const d=new Date(ts*1000);return isNaN(d)?'':
+  d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+
+  ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2);};
+const S_LABEL={done:'完了',error:'失敗',running:'処理中',queued:'待機中'};
+async function loadHistory(){
+  try{
+    const r=await fetch('/api/jobs');
+    if(!r.ok) throw 0;
+    const {jobs}=await r.json();
+    const box=$('history');
+    if(!jobs.length){box.innerHTML='<small>まだ翻訳履歴はありません。</small>';return;}
+    box.innerHTML=jobs.map(j=>{
+      const right = j.available
+        ? '<a class="dl" href="/api/jobs/'+j.id+'/download">ダウンロード</a>'
+        : (j.status==='error'
+             ? '<span class="hmeta">失敗</span>'
+             : (j.status==='done'
+                  ? '<span class="hmeta">期限切れ</span>'
+                  : '<span class="hmeta">'+(S_LABEL[j.status]||j.status)+'</span>'));
+      return '<div class="hitem"><div><div class="hname">'+esc(j.filename)+
+        '</div><div class="hmeta">'+fmtDate(j.created)+
+        (j.engine?' · '+esc(j.engine):'')+'</div></div>'+right+'</div>';
+    }).join('');
+  }catch(e){$('history').innerHTML='<small>履歴を読み込めませんでした。</small>';}
+}
 $('engine').onchange=()=>{
   $('keyrow').style.display = $('engine').value==='gemini' ? 'block' : 'none';
 };
@@ -315,10 +378,12 @@ $('go').onclick=async()=>{
       if(j.status==='done'){
         $('status').innerHTML='完了 <a class="dl" href="/api/jobs/'+id+
           '/download">日本語PDFをダウンロード</a>';
+        loadHistory();
         break;
       }
       if(j.status==='error'){
         $('status').innerHTML='<span class="err">失敗: '+j.error+'</span>';
+        loadHistory();
         break;
       }
       $('status').textContent=j.stage+'…';
@@ -326,6 +391,7 @@ $('go').onclick=async()=>{
   }catch(e){$('status').innerHTML='<span class="err">'+e.message+'</span>';}
   $('go').disabled=false;
 };
+loadHistory();
 </script></body></html>"""
 
 
@@ -337,7 +403,8 @@ def healthz():
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return PAGE.replace("__MAX__", str(MAX_UPLOAD_MB))
+    return (PAGE.replace("__MAX__", str(MAX_UPLOAD_MB))
+                .replace("__TTL__", str(round(JOB_TTL_H / 24))))
 
 
 if __name__ == "__main__":
