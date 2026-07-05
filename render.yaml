@@ -11,6 +11,8 @@ services:
       # everyone, or leave unset and paste the key per-job in the web UI.
       - key: GEMINI_API_KEY
         sync: false
-      # Optional: require this token on /api if you want the app private.
+      # "Only me" mode: set this to a PASSWORD to lock the whole site. The
+      # browser shows a login prompt (enter any username + this password).
+      # Leave empty to let anyone with the URL use it.
       - key: PDF_TRANSLATOR_TOKEN
         sync: false
