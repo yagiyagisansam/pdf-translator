@@ -44,10 +44,13 @@ python src/webapp.py    # -> http://localhost:8000
 ```
 Upload an English PDF, watch progress, download the Japanese PDF. Each job runs
 in its own subprocess and output directory, so concurrent jobs are isolated.
-Set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` on the server to enable the API
-engines; `mock` works offline for the bundled samples. Knobs:
-`PDF_TRANSLATOR_MAX_MB` (upload cap, default 50), `PDF_TRANSLATOR_WORKERS`
-(parallel jobs, default 2), `HOST`/`PORT`.
+`google` (free, keyless) is the default; `gemini` needs a free Google AI Studio
+key (`GEMINI_API_KEY`); `anthropic`/`openai` need their paid keys; `mock` is the
+offline demo. Ops knobs: `PDF_TRANSLATOR_MAX_MB` (upload cap, 50),
+`PDF_TRANSLATOR_WORKERS` (parallel jobs, 2), `PDF_TRANSLATOR_JOB_TTL_H` (auto-
+delete finished jobs after N hours, 24), `PDF_TRANSLATOR_TOKEN` (if set, `/api`
+requires `Authorization: Bearer <token>`), `HOST`/`PORT`. Job metadata persists
+to disk and reloads on restart.
 
 ## CLI
 One command runs the whole pipeline (M1 -> M2 -> translate -> fonts -> M3):
@@ -73,6 +76,7 @@ plus `data/glossary.json` for terminology overrides.
 | engine | cost | notes |
 |---|---|---|
 | `google` | **free, no API key** | deep-translator -> Google web endpoint; no glossary; light/personal volume |
+| `gemini` | **free tier** | Google AI Studio (Gemini); free API key, LLM quality + glossary. Set `GEMINI_API_KEY` (or `GOOGLE_API_KEY`); model via `PDF_TRANSLATOR_GEMINI_MODEL` (default `gemini-2.0-flash`) |
 | `anthropic-batch` | 50% of API price | Message Batches API; asynchronous (minutes) - bulk documents |
 | `anthropic` / `openai` | API price | interactive latency; glossary + placeholder round-trip |
 | `mock` | free | offline demo for the bundled samples |

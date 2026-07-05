@@ -4,15 +4,25 @@
     pip install fastapi uvicorn python-multipart
     python src/webapp.py            # -> http://localhost:8000
 
-Each job runs the CLI pipeline in a subprocess with its own output directory
-(PDF_TRANSLATOR_OUT), so concurrent jobs never share font/analysis files and a
-crash in one job cannot take the server down. Progress is streamed from the
-pipeline's stage prints. Engine 'mock' works offline; 'anthropic'/'openai'
-need the corresponding API key in the server's environment.
-"""
-import os, re, subprocess, sys, threading, time, uuid
+Each job runs the 4-role orchestrator in a subprocess with its own output
+directory (PDF_TRANSLATOR_OUT), so concurrent jobs never share font/analysis
+files and a crash in one job cannot take the server down.
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+Operations:
+- Job metadata is PERSISTED to <job>/job.json and reloaded on startup, so a
+  restart doesn't lose finished jobs / their downloads.
+- Finished job directories are swept after PDF_TRANSLATOR_JOB_TTL_H hours
+  (default 24); a background thread also runs the sweep hourly.
+- Optional auth: if PDF_TRANSLATOR_TOKEN is set, every /api call must send it as
+  `Authorization: Bearer <token>` (or ?token=). Unset = open (local/free use).
+
+Engines: 'google' (free, keyless) default; 'gemini' (free tier, needs a Google
+AI Studio key); 'anthropic'/'openai' paid; 'mock' offline demo.
+"""
+import json as _json
+import os, re, shutil, subprocess, sys, threading, time, uuid
+
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,10 +30,65 @@ JOBS_DIR = os.environ.get("PDF_TRANSLATOR_JOBS",
                           os.path.join(ROOT, "analysis", "webjobs"))
 MAX_UPLOAD_MB = int(os.environ.get("PDF_TRANSLATOR_MAX_MB", "50"))
 MAX_PARALLEL = int(os.environ.get("PDF_TRANSLATOR_WORKERS", "2"))
+JOB_TTL_H = float(os.environ.get("PDF_TRANSLATOR_JOB_TTL_H", "24"))
+AUTH_TOKEN = os.environ.get("PDF_TRANSLATOR_TOKEN")
 
 app = FastAPI(title="PDF EN→JA Translator")
 JOBS = {}  # job_id -> {status, stage, error, result, filename, created}
 _slots = threading.Semaphore(MAX_PARALLEL)
+_PERSIST_KEYS = ("status", "stage", "error", "result", "filename", "engine", "created")
+
+
+def _job_file(job_id):
+    return os.path.join(JOBS_DIR, job_id, "job.json")
+
+
+def _persist(job_id):
+    job = JOBS.get(job_id)
+    if not job:
+        return
+    try:
+        with open(_job_file(job_id), "w") as f:
+            _json.dump({k: job.get(k) for k in _PERSIST_KEYS}, f)
+    except OSError:
+        pass
+
+
+def _load_jobs():
+    if not os.path.isdir(JOBS_DIR):
+        return
+    for jid in os.listdir(JOBS_DIR):
+        jf = _job_file(jid)
+        if os.path.exists(jf):
+            try:
+                d = _json.load(open(jf))
+                # a job left 'running' by a crash is marked errored on reload
+                if d.get("status") == "running":
+                    d["status"] = "error"; d["error"] = "server restarted mid-job"
+                JOBS[jid] = d
+            except (OSError, ValueError):
+                pass
+
+
+def _sweep():
+    """Delete job dirs older than the TTL."""
+    cutoff = time.time() - JOB_TTL_H * 3600
+    for jid, job in list(JOBS.items()):
+        if job.get("created", 0) < cutoff:
+            shutil.rmtree(os.path.join(JOBS_DIR, jid), ignore_errors=True)
+            JOBS.pop(jid, None)
+
+
+def _require_auth(request):
+    if not AUTH_TOKEN:
+        return
+    sent = request.headers.get("authorization", "")
+    if sent.startswith("Bearer "):
+        sent = sent[7:]
+    if not sent:
+        sent = request.query_params.get("token", "")
+    if sent != AUTH_TOKEN:
+        raise HTTPException(401, "invalid or missing token")
 
 # The orchestrator prints "  [<role>] <detail>" per step.
 ROLE_LABELS = {
@@ -76,16 +141,25 @@ def _run_job(job_id):
         # surface the pipeline's own message (e.g. encrypted / scanned PDF)
         err = next((l for l in reversed(tail) if l.startswith("error:")), None)
         job["error"] = (err or "\n".join(tail))[:500]
+    _persist(job_id)
+
+
+ENGINE_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
 
 @app.post("/api/jobs")
-async def create_job(file: UploadFile = File(...), engine: str = Form("mock")):
-    if engine not in ("mock", "google", "anthropic", "openai"):
+async def create_job(request: Request, file: UploadFile = File(...),
+                     engine: str = Form("google")):
+    _require_auth(request)
+    _sweep()
+    if engine not in ("mock", "google", "gemini", "anthropic", "openai"):
         raise HTTPException(400, "unknown engine")
-    if engine == "anthropic" and not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(400, "ANTHROPIC_API_KEY is not set on the server")
-    if engine == "openai" and not os.environ.get("OPENAI_API_KEY"):
-        raise HTTPException(400, "OPENAI_API_KEY is not set on the server")
+    if engine in ENGINE_KEYS and not os.environ.get(ENGINE_KEYS[engine]):
+        raise HTTPException(400, f"{ENGINE_KEYS[engine]} is not set on the server")
+    if engine == "gemini" and not (os.environ.get("GEMINI_API_KEY")
+                                   or os.environ.get("GOOGLE_API_KEY")):
+        raise HTTPException(400, "GEMINI_API_KEY (or GOOGLE_API_KEY) is not set "
+                                 "on the server")
     data = await file.read()
     if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
         raise HTTPException(413, f"file exceeds {MAX_UPLOAD_MB}MB")
@@ -99,12 +173,14 @@ async def create_job(file: UploadFile = File(...), engine: str = Form("mock")):
     JOBS[job_id] = {"status": "queued", "stage": "待機中", "error": None,
                     "result": None, "filename": file.filename or "document.pdf",
                     "engine": engine, "created": time.time()}
+    _persist(job_id)
     threading.Thread(target=_run_job, args=(job_id,), daemon=True).start()
     return {"id": job_id}
 
 
 @app.get("/api/jobs/{job_id}")
-def job_status(job_id: str):
+def job_status(job_id: str, request: Request):
+    _require_auth(request)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
@@ -113,15 +189,34 @@ def job_status(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/download")
-def job_download(job_id: str):
+def job_download(job_id: str, request: Request):
+    _require_auth(request)
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
     if job["status"] != "done":
         raise HTTPException(409, "job not finished")
+    result = job.get("result") or os.path.join(JOBS_DIR, job_id, "doc_ja.pdf")
+    if not os.path.exists(result):
+        raise HTTPException(410, "output expired (job directory was swept)")
     base = os.path.splitext(os.path.basename(job["filename"]))[0]
-    return FileResponse(job["result"], media_type="application/pdf",
+    return FileResponse(result, media_type="application/pdf",
                         filename=f"{base}_ja.pdf")
+
+
+@app.on_event("startup")
+def _startup():
+    _load_jobs()
+    _sweep()
+
+    def _loop():
+        while True:
+            time.sleep(3600)
+            try:
+                _sweep()
+            except Exception:
+                pass
+    threading.Thread(target=_loop, daemon=True).start()
 
 
 PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8">
@@ -152,6 +247,7 @@ small{color:#888}
   <label>翻訳エンジン</label>
   <select id="engine">
     <option value="google" selected>Google 翻訳(無料・APIキー不要)</option>
+    <option value="gemini">Gemini / Google AI Studio(無料枠・要 APIキー)</option>
     <option value="anthropic">Anthropic API(要 ANTHROPIC_API_KEY・有料)</option>
     <option value="openai">OpenAI API(要 OPENAI_API_KEY・有料)</option>
     <option value="mock">mock(オフラインデモ・サンプル専用)</option>
