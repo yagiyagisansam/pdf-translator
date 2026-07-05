@@ -26,7 +26,9 @@ import json as _json
 import os, re, secrets, shutil, subprocess, sys, threading, time, uuid
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
+
+import storage
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JOBS_DIR = os.environ.get("PDF_TRANSLATOR_JOBS",
@@ -58,19 +60,25 @@ def _persist(job_id):
 
 
 def _load_jobs():
-    if not os.path.isdir(JOBS_DIR):
-        return
-    for jid in os.listdir(JOBS_DIR):
-        jf = _job_file(jid)
-        if os.path.exists(jf):
-            try:
-                d = _json.load(open(jf))
-                # a job left 'running' by a crash is marked errored on reload
-                if d.get("status") == "running":
-                    d["status"] = "error"; d["error"] = "server restarted mid-job"
-                JOBS[jid] = d
-            except (OSError, ValueError):
-                pass
+    if os.path.isdir(JOBS_DIR):
+        for jid in os.listdir(JOBS_DIR):
+            jf = _job_file(jid)
+            if os.path.exists(jf):
+                try:
+                    d = _json.load(open(jf))
+                    # a job left 'running' by a crash is marked errored on reload
+                    if d.get("status") == "running":
+                        d["status"] = "error"; d["error"] = "server restarted mid-job"
+                    JOBS[jid] = d
+                except (OSError, ValueError):
+                    pass
+    # Restore finished jobs from Supabase (if configured) that the local disk no
+    # longer has - e.g. after a redeploy wiped it. Local entries win (they are the
+    # freshest); remote-only jobs are added back so they reappear in the history.
+    if storage.enabled():
+        for jid, meta in storage.load_jobs().items():
+            if jid not in JOBS:
+                JOBS[jid] = meta
 
 
 def _sweep():
@@ -79,6 +87,7 @@ def _sweep():
     for jid, job in list(JOBS.items()):
         if job.get("created", 0) < cutoff:
             shutil.rmtree(os.path.join(JOBS_DIR, jid), ignore_errors=True)
+            storage.delete_job(jid)
             JOBS.pop(jid, None)
 
 
@@ -164,6 +173,11 @@ def _run_job(job_id):
         job["status"] = "done"
         job["stage"] = "完了"
         job["result"] = result
+        # mirror to Supabase so it survives a redeploy (no-op if not configured)
+        if storage.enabled():
+            meta = {k: job.get(k) for k in _PERSIST_KEYS}
+            if storage.upload_job(job_id, result, meta):
+                job["stored"] = True
     else:
         job["status"] = "error"
         # surface the pipeline's own message (e.g. encrypted / scanned PDF)
@@ -216,8 +230,12 @@ def list_jobs(request: Request):
     needs to have remembered the job id. Only reachable behind the site
     password, so in "only me" mode this is your private list."""
     items = []
+    remote_on = storage.enabled()
     for jid, job in JOBS.items():
         result = job.get("result") or os.path.join(JOBS_DIR, jid, "doc_ja.pdf")
+        done = job.get("status") == "done"
+        # downloadable if the PDF is on local disk OR mirrored to Supabase
+        available = done and (os.path.exists(result) or remote_on)
         items.append({
             "id": jid,
             "filename": job.get("filename") or "document.pdf",
@@ -226,7 +244,7 @@ def list_jobs(request: Request):
             "error": job.get("error"),
             "engine": job.get("engine"),
             "created": job.get("created", 0),
-            "available": job.get("status") == "done" and os.path.exists(result),
+            "available": available,
         })
     items.sort(key=lambda j: j["created"], reverse=True)
     return {"jobs": items[:50]}
@@ -248,16 +266,32 @@ def job_download(job_id: str, request: Request):
         raise HTTPException(404, "no such job")
     if job["status"] != "done":
         raise HTTPException(409, "job not finished")
-    result = job.get("result") or os.path.join(JOBS_DIR, job_id, "doc_ja.pdf")
-    if not os.path.exists(result):
-        raise HTTPException(410, "output expired (job directory was swept)")
     base = os.path.splitext(os.path.basename(job["filename"]))[0]
-    return FileResponse(result, media_type="application/pdf",
-                        filename=f"{base}_ja.pdf")
+    dl_name = f"{base}_ja.pdf"
+    local = os.path.join(JOBS_DIR, job_id, "doc_ja.pdf")
+    result = job.get("result") or local
+    if os.path.exists(result):
+        return FileResponse(result, media_type="application/pdf", filename=dl_name)
+    # local disk lost it (e.g. redeploy) - pull it back from Supabase and cache it
+    data = storage.fetch_pdf(job_id)
+    if data is None:
+        raise HTTPException(410, "output expired (job directory was swept)")
+    try:
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        with open(local, "wb") as f:
+            f.write(data)
+        job["result"] = local
+    except OSError:
+        pass
+    return Response(data, media_type="application/pdf",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{dl_name}"'})
 
 
 @app.on_event("startup")
 def _startup():
+    if storage.enabled():
+        storage.ensure_bucket()
     _load_jobs()
     _sweep()
 
