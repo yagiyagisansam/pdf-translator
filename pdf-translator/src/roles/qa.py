@@ -12,11 +12,20 @@ English. It verifies:
     - (optional) an LLM "is this natural, complete Japanese?" pass when a key is
       set (PDF_TRANSLATOR_QA_LLM=1); skipped for the free path
 
-  Layout fidelity
+  Layout fidelity (正しい文章配置の確認)
     - figures are preserved and unmoved (the engine never touches them; QA
       asserts none were removed)
-    - no drawn Japanese line overlaps another line or a figure
+    - no drawn Japanese line overlaps another line, a figure, OR a vector rule
+      (horizontal line: abstract-box border, section separator, table rule) -
+      i.e. no 文字と線のかぶり
+    - no residual source English is left drawn under the Japanese
     - nothing overflowed its lane
+
+QA (確認者) and the PDF製作者 (producer) jointly OWN correct text placement: QA
+detects any misplacement (overlap with text / figure / rule, overflow, residual
+English) and routes it back to the producer/editor, which re-runs with a
+tightened spec until placement is clean. Verifying translation MEANING is
+explicitly out of scope.
 
 On failure it returns actionable defects the orchestrator maps to a role +
 tightened parameter, and re-runs, up to a bounded number of rounds.
@@ -172,6 +181,21 @@ def review(name, editor_report):
                                     "detail": f"page {p['page']} text over figure",
                                     "param": "shrink"})
                     break
+        # text drawn ACROSS a vector rule (abstract-box border, section separator,
+        # table rule). Vector art is kept in place, so a drawn line whose vertical
+        # span contains a rule and whose x-range overlaps it is a "文字と線のかぶり".
+        for r in p.get("rules", []):
+            rband = {"x0": r["x0"], "x1": r["x1"],
+                     "top": (r["top"] + r["bottom"]) / 2 - 0.5,
+                     "bottom": (r["top"] + r["bottom"]) / 2 + 0.5}
+            hit = next((ln for ln in lines if _rects_overlap(ln, rband, pad=-1.0)),
+                       None)
+            if hit:
+                defects.append({"role": "producer", "kind": "rule_overlap",
+                                "detail": f"page {p['page']} text crosses a rule "
+                                          f"near y={round(rband['top'])}",
+                                "param": "shrink"})
+                break
 
     if editor_report.get("overflow"):
         defects.append({"role": "editor", "kind": "overflow",

@@ -8,8 +8,22 @@ original language: tables, references, running heads, page numbers) that the
 Japanese must flow around. Figure/table positions are read verbatim from M1 so
 they never move.
 
+ROLE RESPONSIBILITY - correct text placement (正しい文章配置):
+The producer OWNS the geometry that makes placement correct. Every element that
+stays on the page verbatim must be exposed as an obstacle so the editor never
+draws Japanese on top of it. That means, in every lane:
+  - figures / images
+  - kept-language text (tables, references, running heads, page numbers)
+  - VECTOR RULES (horizontal lines: abstract-box borders, section separators,
+    table rules) - kept in place, so text must flow AROUND them, never across.
+It is also the producer's job to strip the source English cleanly so no residual
+fragment is left behind for the editor to draw over (see m3.remove_text_by_content).
+A placement defect (text-on-figure, text-on-rule, text-on-text) is the producer's
+to fix by tightening this spec, together with the QA/確認者 role that detects it.
+
 Reuses M1 (m1_analyze) for the heavy lifting (segmentation, column detection,
-figure extraction, reading order, cross-page joins) and adds the lane geometry.
+figure extraction, vector-rule extraction, reading order, cross-page joins) and
+adds the lane geometry.
 """
 import m1_analyze
 from config import OUT
@@ -69,6 +83,10 @@ def lanes_for_page(page):
                 continue
             if not (b["x1"] <= x0 + 1 or x1 <= b["x0"] + 1):
                 obstacles.append((b["top"], b["bottom"], b["type"]))
+        # vector rules crossing this lane - kept in place, so text flows around
+        for r in page.get("rules", []):
+            if not (r["x1"] <= x0 + 1 or x1 <= r["x0"] + 1):
+                obstacles.append((r["top"] - 3, r["bottom"] + 3, "rule"))
         lanes[lane] = {"x0": x0, "x1": x1, "top": top, "bottom": text_bottom,
                        "obstacles": obstacles}
     # Clamp left/right column x-ranges so they never overlap: a block that

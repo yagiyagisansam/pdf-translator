@@ -264,6 +264,36 @@ def _mkblock(lines, col):
         "nlines": len(lines),
     }
 
+def horizontal_rules(page, min_width=30.0, max_thick=3.0):
+    """Horizontal vector rules on the page (abstract-box borders, section
+    separators, table top/bottom rules) as [{x0,x1,top,bottom}]. The reflow must
+    treat these as obstacles so Japanese text is never drawn across a line -
+    vector art is kept in place, so text has to flow around it. Both pdfplumber
+    `lines` (zero-height horizontals) and thin `rects` (rules drawn as filled
+    boxes) are collected; near-duplicates are merged."""
+    out = []
+    for l in page.lines:
+        top, bot = min(l["top"], l["bottom"]), max(l["top"], l["bottom"])
+        if bot - top <= max_thick and (l["x1"] - l["x0"]) >= min_width:
+            out.append({"x0": float(l["x0"]), "x1": float(l["x1"]),
+                        "top": float(top), "bottom": float(bot)})
+    for r in page.rects:
+        if r["height"] <= max_thick and (r["x1"] - r["x0"]) >= min_width:
+            out.append({"x0": float(r["x0"]), "x1": float(r["x1"]),
+                        "top": float(r["top"]), "bottom": float(r["bottom"])})
+    # merge rules at essentially the same y with overlapping x-extent
+    out.sort(key=lambda r: (round(r["top"]), r["x0"]))
+    merged = []
+    for r in out:
+        m = merged[-1] if merged else None
+        if m and abs(r["top"] - m["top"]) <= 2 and r["x0"] <= m["x1"] + 2:
+            m["x1"] = max(m["x1"], r["x1"]); m["x0"] = min(m["x0"], r["x0"])
+            m["bottom"] = max(m["bottom"], r["bottom"])
+        else:
+            merged.append(dict(r))
+    return merged
+
+
 def reading_order(blocks):
     """Band-based: full-width blocks split page; within band: left col then right col."""
     full = sorted([b for b in blocks if b["col"] == 0], key=lambda b: b["top"])
@@ -345,13 +375,14 @@ def analyze_pdf(path, name, render=True):
                          "x0": im["x0"], "x1": im["x1"],
                          "top": im["top"], "bottom": im["bottom"],
                          "text": "", "order": None})
+        rules = horizontal_rules(page)
         ordered = reading_order(blocks)
         doc["pages"].append({
             "page": pi + 1, "width": pw, "height": ph,
             "x_off": float(page.bbox[0]), "y_off": float(page.bbox[1]),
             "top_off": 0.0,
             "columns": 2 if mid else 1, "body_size": body_size,
-            "blocks": ordered, "figures": figs,
+            "blocks": ordered, "figures": figs, "rules": rules,
         })
     pdf.close()
 
