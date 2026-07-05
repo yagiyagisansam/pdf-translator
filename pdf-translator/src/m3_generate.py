@@ -63,9 +63,13 @@ def _expand_ligatures(s):
 _AMBIG_LIG = ("ﬁ", "ﬂ", "ﬀ", "ﬃ", "ﬄ", "˚", "˜")
 
 def _norm_txt(s):
-    # Expand known ligature glyphs, then keep only alphanumerics, lowercased.
+    # Expand known ligature glyphs, then keep only ASCII alphanumerics, lowercased.
+    # ASCII-only matters for fonts WITHOUT a ToUnicode map: their raw-byte
+    # punctuation glyphs decode to stray high-Latin letters (Ð Ô Õ for – ' •) that
+    # isalnum() would keep and break the substring match. English body text is
+    # ASCII, so restricting to ASCII drops those artifacts on both sides.
     s = _expand_ligatures(s)
-    return "".join(ch.lower() for ch in s if ch.isalnum())
+    return "".join(ch.lower() for ch in s if ch.isascii() and ch.isalnum())
 
 def _norm_txt_drop(s):
     # Same, but drop the ambiguous ligature/quote glyphs instead of expanding.
@@ -73,7 +77,7 @@ def _norm_txt_drop(s):
         s = s.replace(k, v)
     for k in _AMBIG_LIG:
         s = s.replace(k, "")
-    return "".join(ch.lower() for ch in s if ch.isalnum())
+    return "".join(ch.lower() for ch in s if ch.isascii() and ch.isalnum())
 
 def _matches_blob(op_norm, blob, blob_drop=None, op_norm_drop=None):
     """Kill an op if its normalized text is a substring of the translated-block

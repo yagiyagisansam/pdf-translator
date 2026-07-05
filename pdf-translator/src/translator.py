@@ -307,6 +307,71 @@ class GoogleFreeTranslator(Translator):
         return fine.translate_batch(items)
 
 
+class GeminiTranslator(Translator):
+    """FREE LLM engine via Google AI Studio (Gemini). A Google AI Studio API key
+    is free to obtain and has a free request tier - set GEMINI_API_KEY (or
+    GOOGLE_API_KEY). Higher quality and glossary-aware vs. the keyless Google
+    engine, at no cost within the free tier. Units are grouped per request (see
+    module docstring) with a per-unit fallback when a group can't be parsed.
+    Model via PDF_TRANSLATOR_GEMINI_MODEL (default gemini-2.0-flash)."""
+    ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/models/"
+                "{model}:generateContent")
+
+    def __init__(self, model=None, api_key=None, max_workers=2):
+        self.model = model or os.environ.get("PDF_TRANSLATOR_GEMINI_MODEL",
+                                             "gemini-2.0-flash")
+        self.api_key = (api_key or os.environ.get("GEMINI_API_KEY")
+                        or os.environ.get("GOOGLE_API_KEY"))
+        self.max_workers = max_workers
+
+    def _complete(self, prompt, max_tokens):
+        import time as _t
+        import requests
+        url = self.ENDPOINT.format(model=self.model)
+        body = {
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
+        }
+        last = ""
+        for attempt in range(5):
+            r = requests.post(url, params={"key": self.api_key}, json=body, timeout=120)
+            if r.status_code == 200:
+                data = r.json()
+                cands = data.get("candidates", [])
+                if not cands:
+                    return ""
+                parts = cands[0].get("content", {}).get("parts", [])
+                return "".join(p.get("text", "") for p in parts).strip()
+            if r.status_code in (429, 500, 503):     # rate-limited / transient
+                last = f"{r.status_code}"
+                _t.sleep(min(2 ** attempt, 20))
+                continue
+            r.raise_for_status()
+        raise RuntimeError(f"Gemini request failed after retries ({last})")
+
+    def translate_batch(self, items):
+        if not self.api_key:
+            raise RuntimeError("GEMINI_API_KEY (or GOOGLE_API_KEY) is not set")
+        out = [""] * len(items)
+
+        def one_group(group):
+            chars = sum(len(it["text"]) for _, it in group)
+            parsed = _parse_group(self._complete(_group_prompt(group),
+                                                 _max_tokens_for(chars)), len(group))
+            if parsed is None:
+                parsed = [self._complete(_build_user_prompt(
+                    it["text"], it.get("glossary", {}), it.get("kind", "body")),
+                    _max_tokens_for(len(it["text"]))) for _, it in group]
+            return group, parsed
+
+        for group, parsed in _map_concurrent(one_group, list(_groups(items)),
+                                             self.max_workers):
+            for (i, _), tr in zip(group, parsed):
+                out[i] = tr
+        return out
+
+
 class MockTranslator(Translator):
     """Offline engine for the sandbox demo. Looks up a JSON memo of pre-made
     translations keyed by a normalized prefix of the source. This stands in for the
@@ -334,7 +399,7 @@ class MockTranslator(Translator):
         return out
 
 
-ENGINES = ("mock", "google", "anthropic", "anthropic-batch", "openai")
+ENGINES = ("mock", "google", "gemini", "anthropic", "anthropic-batch", "openai")
 
 
 def get_translator(name: str = None, **kw) -> Translator:
@@ -348,6 +413,9 @@ def get_translator(name: str = None, **kw) -> Translator:
         return OpenAITranslator(**kw)
     if name == "google":
         return GoogleFreeTranslator(**kw)
+    if name == "gemini":
+        kw.pop("memo_path", None)
+        return GeminiTranslator(**kw)
     if name == "mock":
         if not memo_path:
             from config import MOCK_MEMO

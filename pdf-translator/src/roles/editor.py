@@ -204,6 +204,17 @@ def build(name, src_path, floor=6.0):
     layout = json.load(open(f"{OUT}/{name}_layout.json"))
     units = json.load(open(f"{OUT}/{name}_bilingual.json"))
 
+    # Slide decks (any landscape page) don't fit the paper reflow band model -
+    # their text boxes are scattered and each slide is independent. Place each
+    # unit across its own block regions with the proven per-region engine, which
+    # keeps text near its original position and spreads multi-page units onto the
+    # right pages.
+    if any(p["width"] > p["height"] for p in layout["pages"]):
+        out_path, stripped = m3.generate(name, src_path)
+        placed = json.load(open(f"{OUT}/{name}_placed.json"))
+        return {"out_path": out_path, "stripped": stripped,
+                "pages": len(layout["pages"]), "placed": placed, "overflow": []}
+
     # 1) strip original translatable text (font-decoded, content-based)
     unit_for_block = {}
     for u in units:

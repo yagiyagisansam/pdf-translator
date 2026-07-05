@@ -135,6 +135,14 @@ def build_units(layout):
                 # heading/caption/title or big-font block is a hard boundary
                 if nb["type"] in ("heading", "caption", "title") or is_big(nb):
                     break
+                # Never merge across a page break on slide decks: each slide is
+                # independent, and stitching its bullets into the previous slide's
+                # unit would place them all on that page and leave this one blank.
+                cross_page = npi != ppi
+                landscape = (pages[npi]["width"] > pages[npi]["height"] or
+                             pages[ppi]["width"] > pages[ppi]["height"])
+                if cross_page and landscape:
+                    break
                 flag_link = pb.get("continues_to_next_page") and nb.get("continues_from_prev_page")
                 if flag_link or _continues(pb["text"], nb["text"], nb["type"]):
                     parts.append((npi, nbi, nb))
