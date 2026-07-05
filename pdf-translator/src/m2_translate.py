@@ -61,6 +61,10 @@ TRANSLATABLE = {"body", "heading", "caption", "title"}
 
 SENT_END = tuple(".!?。:;")
 
+# leading list-item markers: bullet, dash variants, middle dot, checkbox
+_BULLET_RE = re.compile(r"^\s*[•‣⁃▪●–—・·∙]\s*"
+                        r"|^\s*[-–—]\s+")
+
 FOOTER_RE = re.compile(r"(doi:|©|\u00a9|rights reserved|front matter|\d{4}-\d{3,4}|"
                        r"Corresponding author|E-mail address)", re.I)
 
@@ -142,6 +146,11 @@ def build_units(layout):
                 landscape = (pages[npi]["width"] > pages[npi]["height"] or
                              pages[ppi]["width"] > pages[ppi]["height"])
                 if cross_page and landscape:
+                    break
+                # a new list item (bullet / dash marker) is a hard boundary, so
+                # each bullet stays its own unit and keeps its original position
+                # (critical on slides; harmless on prose).
+                if _BULLET_RE.match(nb["text"]):
                     break
                 flag_link = pb.get("continues_to_next_page") and nb.get("continues_from_prev_page")
                 if flag_link or _continues(pb["text"], nb["text"], nb["type"]):

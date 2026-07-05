@@ -355,6 +355,25 @@ def analyze_pdf(path, name, render=True):
         })
     pdf.close()
 
+    # document-level reference sweep: everything from the "References" heading
+    # (or "Bibliography" / "参考文献") to the end of the document is a reference and
+    # stays English. Per-page REF_RE only catches the numbered first line of each
+    # entry; continuation lines stay 'body' and would get translated. Anchoring on
+    # the heading and sweeping to the end types the whole section correctly.
+    REF_HEAD = re.compile(r"^\s*(references|bibliography|参考文献|引用文献|literature cited)\b",
+                          re.I)
+    started = False
+    for p in doc["pages"]:
+        ordered_blocks = sorted(p["blocks"], key=lambda b: b.get("order", 1e9))
+        for b in ordered_blocks:
+            if not started and b["type"] in ("heading", "body", "title") \
+                    and REF_HEAD.match(b["text"]) and len(b["text"]) < 40:
+                started = True
+                b["type"] = "heading"   # keep the heading itself (not translated body)
+                continue
+            if started and b["type"] in ("body", "data", "caption", "heading"):
+                b["type"] = "reference"
+
     # mark repeated headers (same normalized text in top region on >=3 pages)
     from collections import Counter
     def norm(t): return re.sub(r"[\d\s]", "", t).lower()[:40]
