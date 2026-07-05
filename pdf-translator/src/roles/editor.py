@@ -53,7 +53,10 @@ def _merged_bands(obstacles):
 
 
 def _obstacles_for(page, x0, x1):
-    """(top, bottom) bands in [x0,x1] from figures + kept-language text."""
+    """(top, bottom) bands in [x0,x1] from figures + kept-language text + vector
+    rules. Vector art is kept in place, so a horizontal rule (abstract-box border,
+    section separator, table rule) that crosses this column becomes a small
+    obstacle band the flow skips - Japanese is never drawn across a line."""
     obs = []
     for f in page.get("figures", []):
         if _overlaps(x0, x1, f["x0"], f["x1"]):
@@ -61,6 +64,9 @@ def _obstacles_for(page, x0, x1):
     for b in page["blocks"]:
         if b["type"] in KEPT and _overlaps(x0, x1, b["x0"], b["x1"]):
             obs.append((b["top"] - 2, b["bottom"] + 2))
+    for r in page.get("rules", []):
+        if _overlaps(x0, x1, r["x0"], r["x1"]):
+            obs.append((r["top"] - 3, r["bottom"] + 3))
     return _merged_bands(obs)
 
 

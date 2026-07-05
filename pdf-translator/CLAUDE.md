@@ -53,8 +53,10 @@ then `python -m pytest tests/` before and after any change.
 ## Known remaining issues (open work, prioritised in docs/IMPROVEMENT_PLAN.md)
 - A few stray fragments can survive on the title page (author-line superscript affiliation
   markers a/b/c/d; occasional citation number at a paragraph edge).
-- Vector rules (table lines) are not obstacles for placement, so a caption whose Japanese
-  needs more lines than the English can touch the table's top rule.
+- Vector rules (horizontal lines: abstract-box borders, section separators, table rules)
+  ARE now obstacles: M1 extracts them (`horizontal_rules` -> page `"rules"`), the producer
+  exposes them as obstacle bands, the editor's reflow skips them, and QA flags any
+  text-on-rule overlap (`rule_overlap`). Do not regress: keep rules in the obstacle set.
 - Deck (slides) Japanese generation is less complete than the paper.
 - `mock_memo.json` covers the paper sample only; it is a demo stand-in for a real API.
 - pypdf gotcha (already fixed, do not regress): merge overlay pages onto the WRITER's
