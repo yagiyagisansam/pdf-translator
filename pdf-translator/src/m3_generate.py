@@ -539,12 +539,14 @@ def generate(name, src_path):
         pw,ph,xo,yo=page_sizes[pi]
         if c is None: c=canvas.Canvas(overlay,pagesize=(pw,ph))
         else: c.setPageSize((pw,ph))
-        # reportlab canvas origin is mediabox bottom-left; canvas spans mediabox.
-        # content y for a pdfplumber 'top' is (mb_top - top); reportlab y is that
-        # minus mb_bottom => mediabox_height - top. So baseline = ph - y_top - size.
+        # The overlay merges into the page's ABSOLUTE space, and pdfplumber x/y are
+        # already absolute (they include the mediabox origin), so we must NOT
+        # subtract the mediabox offset: x = d["x"], baseline y = ph - y_top - size.
+        # Subtracting xo shoved every line left by the mediabox origin (e.g. 42pt)
+        # on PDFs whose mediabox is not at x=0 -> the body looked "左寄り".
         for d in per_page_draws[pi]:
             c.setFillColor(Color(0,0,0)); c.setFont(d["font"], d["size"])
-            c.drawString(d["x"] - xo, ph - d["y_top"] - d["size"], d["line"])
+            c.drawString(d["x"], ph - d["y_top"] - d["size"], d["line"])
         c.showPage()
     c.save()
 
