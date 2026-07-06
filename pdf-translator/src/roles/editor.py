@@ -11,8 +11,10 @@ Steps:
   1. Strip the original translatable text in place (content-based, font-decoded
      - reuses m3_generate; kept text like tables/refs/headers survives).
   2. Per page: group the page's units (reading order) into full-width / two-column
-     bands; pick the largest page font (cap..floor) that fits; flow each band,
-     figures fixed as obstacles.
+     bands; size the body font to FILL the page - shrink toward `floor` if it
+     doesn't fit at CAP, or GROW up to GROW_CAP if a short translation would
+     otherwise leave the lower half empty; flow each band with figures, kept text
+     and vector rules fixed as obstacles; justify (両端揃え) every non-final line.
   3. Overlay + merge (pypdf-6-safe) onto the stripped pages.
 
 Falls back to the proven per-region engine (m3.generate) when reflow cannot fit
@@ -29,7 +31,9 @@ import m3_generate as m3
 from config import OUT, ensure_out
 from roles import producer
 
-CAP = 10.5
+CAP = 10.5               # preferred body size when a page is already full
+GROW_CAP = 15.0          # max body size when GROWING to fill a sparse page
+FILL_TARGET = 0.82       # grow the font until the column is at least this full
 LR = 1.16                # line-height ratio
 PARA_GAP = 0.5           # blank line-heights between units
 HEAD_GAP = 0.9           # extra before a heading
@@ -235,8 +239,31 @@ def _layout_page(page, page_units, size, font_of):
     return draws, overflow
 
 
+def _fill_ratio(page, draws, size):
+    """Fraction of the page's body height the drawn text reaches. Used to decide
+    whether to GROW the font so a short Japanese page fills its columns instead of
+    sitting packed at the top with a big empty lower half."""
+    if not draws:
+        return 0.0
+    g = _page_geom(page)
+    if not g:
+        return 1.0
+    avail = g["bottom"] - g["top"]
+    if avail <= 0:
+        return 1.0
+    used = max(d["y_top"] + size for d in draws) - g["top"]
+    return used / avail
+
+
 def _reflow(layout, units, floor):
-    """Whole-document reflow. Returns (per_page_draws, total_overflow)."""
+    """Whole-document reflow. Returns (per_page_draws, total_overflow).
+
+    Font sizing per page:
+    - if the content does NOT fit at CAP, shrink toward `floor` (dense page);
+    - if it DOES fit at CAP, GROW the font (up to GROW_CAP) until the columns are
+      ~FILL_TARGET full, so a short translation fills the page instead of leaving
+      the lower half empty (the "後半部の空白 / 左寄り" the user reported).
+    Figures/tables never move; growth stops as soon as any lane would overflow."""
     # tag each unit with its lane (first block's column) and home page
     by_page = {}
     for u in units:
@@ -251,17 +278,34 @@ def _reflow(layout, units, floor):
         pu = by_page.get(pi, [])
         if not pu:
             continue
-        best = None
-        size = CAP
-        while size >= floor:
-            draws, ov = _layout_page(page, pu, size, _font_of)
-            if ov == 0:
-                best = draws; break
-            size -= 0.5
-        if best is None:
-            draws, ov = _layout_page(page, pu, floor, _font_of)
-            best = draws; total_overflow += ov
-        per_page[pi] = best
+        cap_draws, cap_ov = _layout_page(page, pu, CAP, _font_of)
+        if cap_ov > 0:
+            # dense page: shrink from CAP down to the largest size that fits
+            best = None
+            size = CAP - 0.5
+            while size >= floor:
+                draws, ov = _layout_page(page, pu, size, _font_of)
+                if ov == 0:
+                    best = draws; break
+                size -= 0.5
+            if best is None:
+                draws, ov = _layout_page(page, pu, floor, _font_of)
+                best = draws; total_overflow += ov
+            per_page[pi] = best
+        else:
+            # fits at CAP: grow to fill the columns if the page is underfilled
+            best = cap_draws
+            if _fill_ratio(page, cap_draws, CAP) < FILL_TARGET:
+                size = CAP + 0.5
+                while size <= GROW_CAP:
+                    draws, ov = _layout_page(page, pu, size, _font_of)
+                    if ov > 0:
+                        break               # would overflow - keep last good
+                    best = draws
+                    if _fill_ratio(page, draws, size) >= FILL_TARGET:
+                        break               # filled enough
+                    size += 0.5
+            per_page[pi] = best
     return per_page, total_overflow
 
 
