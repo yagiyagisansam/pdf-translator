@@ -37,6 +37,13 @@ MAX_UPLOAD_MB = int(os.environ.get("PDF_TRANSLATOR_MAX_MB", "50"))
 MAX_PARALLEL = int(os.environ.get("PDF_TRANSLATOR_WORKERS", "2"))
 JOB_TTL_H = float(os.environ.get("PDF_TRANSLATOR_JOB_TTL_H", "168"))
 AUTH_TOKEN = os.environ.get("PDF_TRANSLATOR_TOKEN")
+# While a translation is running, ping our own public URL this often so a free
+# host (Render) does not spin down for idleness and kill the in-progress job when
+# the user's browser tab is backgrounded and stops polling. Only active jobs
+# trigger it, so an idle app still sleeps normally.
+KEEPALIVE_SEC = int(os.environ.get("PDF_TRANSLATOR_KEEPALIVE_SEC", "300"))
+SELF_URL = (os.environ.get("RENDER_EXTERNAL_URL")
+            or os.environ.get("PDF_TRANSLATOR_PUBLIC_URL") or "").rstrip("/")
 
 app = FastAPI(title="PDF EN→JA Translator")
 JOBS = {}  # job_id -> {status, stage, error, result, filename, created}
@@ -288,11 +295,37 @@ def job_download(job_id: str, request: Request):
                              f'attachment; filename="{dl_name}"'})
 
 
+def _has_active_job():
+    return any(j.get("status") in ("queued", "running") for j in JOBS.values())
+
+
+def _keepalive_loop():
+    """Keep the free host awake WHILE a job is processing, so a backgrounded
+    phone tab (polling stopped) cannot let the instance idle-sleep and kill the
+    running translation. Pings the public URL only when a job is active."""
+    if not SELF_URL:
+        return
+    url = SELF_URL + "/healthz"
+    while True:
+        time.sleep(KEEPALIVE_SEC)
+        if not _has_active_job():
+            continue
+        try:
+            import requests
+            requests.get(url, timeout=30)
+        except Exception:
+            pass
+
+
 @app.on_event("startup")
 def _startup():
     if storage.enabled():
         storage.ensure_bucket()
     _load_jobs()
+    n_done = sum(1 for j in JOBS.values() if j.get("status") == "done")
+    print(f"[webapp] loaded {len(JOBS)} job(s) ({n_done} done); "
+          f"storage={'on' if storage.enabled() else 'off'}; "
+          f"keepalive={'on' if SELF_URL else 'off'}", file=sys.stderr)
     _sweep()
 
     def _loop():
@@ -303,6 +336,7 @@ def _startup():
             except Exception:
                 pass
     threading.Thread(target=_loop, daemon=True).start()
+    threading.Thread(target=_keepalive_loop, daemon=True).start()
 
 
 PAGE = """<!doctype html><html lang="ja"><head><meta charset="utf-8">
@@ -406,9 +440,21 @@ $('go').onclick=async()=>{
     const r=await fetch('/api/jobs',{method:'POST',body:fd});
     if(!r.ok){throw new Error((await r.json()).detail||r.statusText);}
     const {id}=await r.json();
+    let miss=0;
     while(true){
       await new Promise(s=>setTimeout(s,1500));
-      const j=await (await fetch('/api/jobs/'+id)).json();
+      let j;
+      try{
+        const rr=await fetch('/api/jobs/'+id);
+        if(!rr.ok) throw 0;
+        j=await rr.json();
+      }catch(_){
+        // transient network blip (e.g. host waking up) - keep polling, don't give up
+        miss++;
+        $('status').textContent='サーバ応答待ち…（'+miss+'）';
+        continue;
+      }
+      miss=0;
       if(j.status==='done'){
         $('status').innerHTML='完了 <a class="dl" href="/api/jobs/'+id+
           '/download">日本語PDFをダウンロード</a>';
@@ -426,6 +472,9 @@ $('go').onclick=async()=>{
   $('go').disabled=false;
 };
 loadHistory();
+// keep the history fresh while the tab is open, so a job that finishes after the
+// tab was backgrounded (or on another device) shows up without a manual reload
+setInterval(loadHistory, 20000);
 </script></body></html>"""
 
 
