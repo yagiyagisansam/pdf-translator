@@ -377,7 +377,13 @@ def build(name, src_path, floor=6.0):
         c.setFillColor(Color(0, 0, 0))
         for d in per_page.get(pi, []):
             cs = _justify_amount(d)
-            t = c.beginText(d["x"] - xo, ph - d["y_top"] - d["size"])
+            # pdfplumber x is ALREADY absolute page space (it includes the media
+            # box left offset), and the overlay merges into that same space, so we
+            # must NOT subtract xo here - doing so shoved every line left by the
+            # mediabox origin (e.g. 42pt) on PDFs whose mediabox is not at x=0,
+            # which read as the whole body being "左寄り". y already omits yo for
+            # the same reason, so x now matches y.
+            t = c.beginText(d["x"], ph - d["y_top"] - d["size"])
             t.setFont(d["font"], d["size"])
             t.setCharSpace(cs if cs is not None else 0)
             t.textLine(d["line"])
