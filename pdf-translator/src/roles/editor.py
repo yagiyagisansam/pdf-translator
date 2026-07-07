@@ -66,7 +66,12 @@ def _obstacles_for(page, x0, x1):
         if _overlaps(x0, x1, f["x0"], f["x1"]):
             obs.append((f["top"] - 6, f["bottom"] + 6))
     for b in page["blocks"]:
-        if b["type"] in KEPT and _overlaps(x0, x1, b["x0"], b["x1"]):
+        # kept-language text, OR a translatable block whose translation is missing
+        # so its ENGLISH still sits on the page: both must block the flow, else the
+        # reflowed Japanese (e.g. overflow from the other column) is drawn on top of
+        # surviving English -> the "overlay" seen when translation partially fails.
+        if (b["type"] in KEPT or b.get("_keep_en")) and \
+                _overlaps(x0, x1, b["x0"], b["x1"]):
             obs.append((b["top"] - 2, b["bottom"] + 2))
     for r in page.get("rules", []):
         if _overlaps(x0, x1, r["x0"], r["x1"]):
@@ -343,6 +348,11 @@ def build(name, src_path, floor=6.0):
             if b["type"] in TRANS and f"{pi}:{bi}" in unit_for_block:
                 kill[pi] += m3._norm_txt(b["text"])
                 kill_drop[pi] += m3._norm_txt_drop(b["text"])
+            elif b["type"] in TRANS:
+                # translatable but NOT covered by a translated unit: its English
+                # stays on the page, so mark it so the reflow treats it as an
+                # obstacle and never draws Japanese over it.
+                b["_keep_en"] = True
     pdf = Pdf.open(src_path)
     for pi, page in enumerate(pdf.pages):
         if kill.get(pi):
