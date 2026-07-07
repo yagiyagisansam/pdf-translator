@@ -230,6 +230,22 @@ async def create_job(request: Request, file: UploadFile = File(...),
     return {"id": job_id}
 
 
+@app.get("/api/diag")
+def diag(request: Request):
+    """One-tap health check for the save/restore path. Open this URL in the phone
+    browser: it says whether Supabase is wired up and whether a real upload works,
+    so a broken key/bucket is obvious without digging through Render logs."""
+    done = sum(1 for j in JOBS.values() if j.get("status") == "done")
+    return {
+        "jobs_total": len(JOBS),
+        "jobs_done": done,
+        "jobs_dir": JOBS_DIR,
+        "jobs_dir_exists": os.path.isdir(JOBS_DIR),
+        "keepalive_url_set": bool(SELF_URL),
+        "storage": storage.selftest(),
+    }
+
+
 @app.get("/api/jobs")
 def list_jobs(request: Request):
     """Recent jobs (newest first) so the page can show a history and finished

@@ -172,3 +172,62 @@ def delete_job(job_id):
             timeout=_TIMEOUT)
     except Exception as e:
         _log(f"delete_job {job_id} failed: {e}")
+
+
+def config_status():
+    """Non-secret view of the storage configuration (for the diag endpoint)."""
+    return {
+        "requests_available": requests is not None,
+        "url_set": bool(_URL),
+        "key_set": bool(_KEY),
+        "bucket": _BUCKET,
+        "enabled": enabled(),
+    }
+
+
+def selftest():
+    """Round-trip a tiny object (create bucket -> upload -> read -> delete) to
+    prove the configured URL + key + bucket actually work. Returns a dict of
+    step results and, on failure, the HTTP status/message so a misconfigured key
+    (anon instead of service_role, wrong URL, ...) is obvious. Never raises."""
+    out = dict(config_status(), bucket_ok=False, upload_ok=False,
+               read_ok=False, delete_ok=False, error=None)
+    if not enabled():
+        out["error"] = "storage not enabled (SUPABASE_URL / SUPABASE_KEY unset)"
+        return out
+    path = "_diag/selftest.txt"
+    payload = b"ok"
+    try:
+        # ensure bucket
+        r = requests.post(f"{_URL}/storage/v1/bucket",
+                          headers=_headers({"Content-Type": "application/json"}),
+                          data=json.dumps({"name": _BUCKET, "id": _BUCKET,
+                                           "public": False}),
+                          timeout=_TIMEOUT)
+        out["bucket_ok"] = r.status_code in (200, 400, 409)
+        if not out["bucket_ok"]:
+            out["error"] = f"bucket create -> HTTP {r.status_code}: {r.text[:160]}"
+            return out
+        # upload
+        r = requests.post(_obj_url(path),
+                          headers=_headers({"Content-Type": "text/plain",
+                                            "x-upsert": "true"}),
+                          data=payload, timeout=_TIMEOUT)
+        out["upload_ok"] = r.status_code in (200, 201)
+        if not out["upload_ok"]:
+            out["error"] = f"upload -> HTTP {r.status_code}: {r.text[:160]}"
+            return out
+        # read back
+        r = requests.get(_obj_url(path), headers=_headers(), timeout=_TIMEOUT)
+        out["read_ok"] = (r.status_code == 200 and r.content == payload)
+        if not out["read_ok"]:
+            out["error"] = f"read -> HTTP {r.status_code}"
+        # cleanup (best effort)
+        r = requests.request(
+            "DELETE", f"{_URL}/storage/v1/object/{_BUCKET}",
+            headers=_headers({"Content-Type": "application/json"}),
+            data=json.dumps({"prefixes": [path]}), timeout=_TIMEOUT)
+        out["delete_ok"] = r.status_code in (200, 204)
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
