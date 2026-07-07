@@ -34,8 +34,24 @@ try:
 except Exception:                     # pragma: no cover - requests ships with deep-translator
     requests = None
 
-_URL = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
-_KEY = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY") or ""
+def _base_url(raw):
+    """Normalize SUPABASE_URL to just scheme://host. Users often paste the "Data
+    API / RESTful endpoint" (…supabase.co/rest/v1) or a URL with a trailing path;
+    keeping any path makes /storage/v1/... resolve under PostgREST instead of the
+    Storage service and fail with PGRST125 'Invalid path'. Strip it so only the
+    project origin is used."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "https://" + raw
+    from urllib.parse import urlsplit
+    p = urlsplit(raw)
+    return f"{p.scheme}://{p.netloc}" if p.netloc else raw.rstrip("/")
+
+
+_URL = _base_url(os.environ.get("SUPABASE_URL"))
+_KEY = (os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY") or "").strip()
 _BUCKET = os.environ.get("SUPABASE_BUCKET", "translations")
 _TIMEOUT = float(os.environ.get("SUPABASE_TIMEOUT", "30"))
 PDF_NAME = "doc_ja.pdf"
@@ -179,6 +195,7 @@ def config_status():
     return {
         "requests_available": requests is not None,
         "url_set": bool(_URL),
+        "url": _URL,                 # project origin only (not a secret)
         "key_set": bool(_KEY),
         "bucket": _BUCKET,
         "enabled": enabled(),
