@@ -203,6 +203,31 @@ def delete_job(job_id):
         _log(f"delete_job {job_id} failed: {e}")
 
 
+def _key_role():
+    """Identify the configured key WITHOUT exposing the secret. Supabase anon and
+    service_role keys are BOTH JWTs starting with 'eyJ', so they look identical -
+    the only way to tell them apart is the `role` claim inside. Only service_role
+    bypasses RLS; an anon key hits 'row-level security policy' on upload. Returns
+    e.g. 'service_role', 'anon', 'secret(sb_secret_)', or 'unknown'."""
+    k = _KEY
+    if not k:
+        return None
+    if k.startswith("sb_secret_"):
+        return "secret(sb_secret_)"        # new-style secret key (elevated)
+    if k.startswith("sb_publishable_"):
+        return "publishable(sb_publishable_)"  # new-style public key (RLS applies)
+    if k.startswith("eyJ") and k.count(".") == 2:
+        try:
+            import base64
+            payload = k.split(".")[1]
+            payload += "=" * (-len(payload) % 4)      # restore base64 padding
+            claims = json.loads(base64.urlsafe_b64decode(payload))
+            return claims.get("role") or "jwt(no role claim)"
+        except Exception:
+            return "jwt(undecodable)"
+    return "unknown"
+
+
 def config_status():
     """Non-secret view of the storage configuration (for the diag endpoint)."""
     return {
@@ -210,6 +235,7 @@ def config_status():
         "url_set": bool(_URL),
         "url": _URL,                 # project origin only (not a secret)
         "key_set": bool(_KEY),
+        "key_role": _key_role(),     # 'service_role' is required; 'anon' -> RLS error
         "bucket": _BUCKET,
         "enabled": enabled(),
     }
