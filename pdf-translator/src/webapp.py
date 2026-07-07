@@ -311,6 +311,18 @@ def job_download(job_id: str, request: Request):
                              f'attachment; filename="{dl_name}"'})
 
 
+@app.delete("/api/jobs/{job_id}")
+def job_delete(job_id: str, request: Request):
+    """Delete a translated PDF: remove its local files, its Supabase copy (if any),
+    and drop it from the history. Behind the site password like everything else."""
+    if job_id not in JOBS:
+        raise HTTPException(404, "no such job")
+    shutil.rmtree(os.path.join(JOBS_DIR, job_id), ignore_errors=True)
+    storage.delete_job(job_id)
+    JOBS.pop(job_id, None)
+    return {"ok": True, "id": job_id}
+
+
 def _has_active_job():
     return any(j.get("status") in ("queued", "running") for j in JOBS.values())
 
@@ -379,6 +391,10 @@ small{color:#888}
 .hname{font-size:14px;word-break:break-all}
 .hmeta{font-size:12px;color:#888}
 .hitem a{white-space:nowrap;font-weight:bold}
+.hact{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:none}
+button.del{margin:0;padding:4px 10px;font-size:12px;background:transparent;
+       color:#dc2626;border:1px solid #dc262688;border-radius:6px;cursor:pointer}
+button.del:disabled{opacity:.5}
 </style></head><body>
 <h1>PDF 英日翻訳(レイアウト保持)</h1>
 <p>英語のPDF(論文・スライド)をアップロードすると、図表の位置を保持したまま
@@ -436,11 +452,25 @@ async function loadHistory(){
              : (j.status==='done'
                   ? '<span class="hmeta">期限切れ</span>'
                   : '<span class="hmeta">'+(S_LABEL[j.status]||j.status)+'</span>'));
+      const del = '<button class="del" data-id="'+j.id+'" data-name="'+
+        esc(j.filename)+'" title="削除">削除</button>';
       return '<div class="hitem"><div><div class="hname">'+esc(j.filename)+
         '</div><div class="hmeta">'+fmtDate(j.created)+
-        (j.engine?' · '+esc(j.engine):'')+'</div></div>'+right+'</div>';
+        (j.engine?' · '+esc(j.engine):'')+'</div></div>'+
+        '<div class="hact">'+right+del+'</div></div>';
     }).join('');
+    box.querySelectorAll('button.del').forEach(b=>{ b.onclick=deleteJob; });
   }catch(e){$('history').innerHTML='<small>履歴を読み込めませんでした。</small>';}
+}
+async function deleteJob(e){
+  const b=e.currentTarget, id=b.dataset.id;
+  if(!confirm('「'+b.dataset.name+'」の翻訳PDFを削除しますか？この操作は取り消せません。')) return;
+  b.disabled=true; b.textContent='削除中…';
+  try{
+    const r=await fetch('/api/jobs/'+id,{method:'DELETE'});
+    if(!r.ok) throw 0;
+    loadHistory();
+  }catch(_){ b.disabled=false; b.textContent='削除'; alert('削除に失敗しました。'); }
 }
 $('engine').onchange=()=>{
   $('keyrow').style.display = $('engine').value==='gemini' ? 'block' : 'none';
