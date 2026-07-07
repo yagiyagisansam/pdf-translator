@@ -26,7 +26,7 @@ markers, DOIs, abbreviations) are already replaced by placeholders ⟦Tn⟧, whi
 every engine must keep verbatim (validated + retried in translate_units.py).
 """
 from __future__ import annotations
-import os, json, re, time
+import os, json, re, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional
 
@@ -317,12 +317,55 @@ class GeminiTranslator(Translator):
     ENDPOINT = ("https://generativelanguage.googleapis.com/v1beta/models/"
                 "{model}:generateContent")
 
-    def __init__(self, model=None, api_key=None, max_workers=2):
+    def __init__(self, model=None, api_key=None, max_workers=None):
         self.model = model or os.environ.get("PDF_TRANSLATOR_GEMINI_MODEL",
                                              "gemini-2.0-flash")
         self.api_key = (api_key or os.environ.get("GEMINI_API_KEY")
                         or os.environ.get("GOOGLE_API_KEY"))
+        # The free tier is rate-limited per MINUTE (gemini-2.0-flash ~15 RPM), so
+        # bursty concurrency just trips 429. Default to serial requests spaced by a
+        # minimum interval that stays under the limit.
+        if max_workers is None:
+            max_workers = int(os.environ.get("PDF_TRANSLATOR_GEMINI_WORKERS", "1"))
         self.max_workers = max_workers
+        self.min_interval = float(
+            os.environ.get("PDF_TRANSLATOR_GEMINI_MIN_INTERVAL", "4.5"))
+        self._throttle_lock = threading.Lock()
+        self._last_call = 0.0
+        # circuit breaker: after this many requests fail in a row (e.g. the daily
+        # quota is exhausted), stop trying and leave the rest untranslated fast,
+        # instead of burning a minute of retries on every remaining group.
+        self._fail_streak = 0
+        self._circuit_broken = False
+
+    def _throttle(self):
+        """Space requests at least min_interval apart (across threads) to stay
+        under the free-tier requests-per-minute cap and avoid 429s."""
+        import time as _t
+        with self._throttle_lock:
+            wait = self.min_interval - (_t.monotonic() - self._last_call)
+            if wait > 0:
+                _t.sleep(wait)
+            self._last_call = _t.monotonic()
+
+    @staticmethod
+    def _retry_delay(r):
+        """Seconds to wait per the server, from Retry-After or the 429 body's
+        retryDelay (e.g. '31s'), or None."""
+        ra = r.headers.get("Retry-After")
+        if ra:
+            try:
+                return float(ra)
+            except ValueError:
+                pass
+        try:
+            for d in r.json().get("error", {}).get("details", []):
+                rd = d.get("retryDelay")
+                if rd and rd.endswith("s"):
+                    return float(rd[:-1])
+        except Exception:
+            pass
+        return None
 
     def _complete(self, prompt, max_tokens):
         import time as _t
@@ -333,11 +376,15 @@ class GeminiTranslator(Translator):
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
         }
+        if self._circuit_broken:
+            return ""                       # quota likely exhausted - fail fast
         last = ""
         for attempt in range(5):
+            self._throttle()
             r = requests.post(url, params={"key": self.api_key}, json=body, timeout=120)
             if r.status_code == 200:
                 data = r.json()
+                self._fail_streak = 0
                 cands = data.get("candidates", [])
                 if not cands:
                     return ""
@@ -345,10 +392,24 @@ class GeminiTranslator(Translator):
                 return "".join(p.get("text", "") for p in parts).strip()
             if r.status_code in (429, 500, 503):     # rate-limited / transient
                 last = f"{r.status_code}"
-                _t.sleep(min(2 ** attempt, 20))
+                delay = self._retry_delay(r)
+                if delay is None:
+                    delay = min(2 ** attempt, 30)
+                _t.sleep(delay)
                 continue
             r.raise_for_status()
-        raise RuntimeError(f"Gemini request failed after retries ({last})")
+        # Give up on THIS request without crashing the whole job: return empty so
+        # the affected units stay in English (the layout step flows around them or
+        # leaves the page as-is) instead of losing every already-translated unit.
+        self._fail_streak += 1
+        if self._fail_streak >= 4 and not self._circuit_broken:
+            self._circuit_broken = True
+            print("[gemini] too many failures in a row (quota likely exhausted); "
+                  "leaving the remaining units untranslated", file=sys.stderr)
+        else:
+            print(f"[gemini] request failed after retries ({last}); leaving those "
+                  f"units untranslated", file=sys.stderr)
+        return ""
 
     def translate_batch(self, items):
         if not self.api_key:
@@ -357,8 +418,12 @@ class GeminiTranslator(Translator):
 
         def one_group(group):
             chars = sum(len(it["text"]) for _, it in group)
-            parsed = _parse_group(self._complete(_group_prompt(group),
-                                                 _max_tokens_for(chars)), len(group))
+            raw = self._complete(_group_prompt(group), _max_tokens_for(chars))
+            if not raw:
+                # rate-limited/failed group: don't hammer the API per-unit, just
+                # leave them untranslated
+                return group, [""] * len(group)
+            parsed = _parse_group(raw, len(group))
             if parsed is None:
                 parsed = [self._complete(_build_user_prompt(
                     it["text"], it.get("glossary", {}), it.get("kind", "body")),
