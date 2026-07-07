@@ -260,7 +260,7 @@ def _fill_ratio(page, draws, size):
     return used / avail
 
 
-def _reflow(layout, units, floor):
+def _reflow(layout, units, floor, skip_pages=frozenset()):
     """Whole-document reflow. Returns (per_page_draws, total_overflow).
 
     Font sizing per page:
@@ -280,6 +280,8 @@ def _reflow(layout, units, floor):
     per_page = {pi: [] for pi in range(len(layout["pages"]))}
     total_overflow = 0
     for pi, page in enumerate(layout["pages"]):
+        if pi in skip_pages:
+            continue                       # mostly-untranslated: leave English
         pu = by_page.get(pi, [])
         if not pu:
             continue
@@ -341,9 +343,27 @@ def build(name, src_path, floor=6.0):
         if u.get("target"):
             for sid in u["spans"]:
                 unit_for_block[sid] = u
+    # Per-page translation coverage (by translatable character count). If a page
+    # is MOSTLY untranslated - e.g. the free engine broke the citation tokens on
+    # most of its paragraphs - reflowing the few translated bits into the gaps
+    # around a wall of surviving English produces an unreadable pile. Leaving that
+    # page entirely in its original English is far better, so such pages are
+    # skipped: not stripped, not reflowed.
+    MIN_PAGE_COV = 0.5
+    skip_pages = set()
+    for pi, p in enumerate(layout["pages"]):
+        tot = sum(len(b["text"]) for bi, b in enumerate(p["blocks"])
+                  if b["type"] in TRANS)
+        cov = sum(len(b["text"]) for bi, b in enumerate(p["blocks"])
+                  if b["type"] in TRANS and f"{pi}:{bi}" in unit_for_block)
+        if tot and cov / tot < MIN_PAGE_COV:
+            skip_pages.add(pi)
+
     kill, kill_drop = {}, {}
     for pi, p in enumerate(layout["pages"]):
         kill[pi] = kill_drop[pi] = ""
+        if pi in skip_pages:
+            continue                       # leave this page's English untouched
         for bi, b in enumerate(p["blocks"]):
             if b["type"] in TRANS and f"{pi}:{bi}" in unit_for_block:
                 kill[pi] += m3._norm_txt(b["text"])
@@ -360,8 +380,8 @@ def build(name, src_path, floor=6.0):
     stripped = f"{OUT}/{name}_stripped.pdf"
     pdf.save(stripped); pdf.close()
 
-    # 2) reflow
-    per_page, overflow = _reflow(layout, units, floor)
+    # 2) reflow (skip the mostly-untranslated pages so they stay original English)
+    per_page, overflow = _reflow(layout, units, floor, skip_pages)
 
     placed = {}
     for pi, draws in per_page.items():
