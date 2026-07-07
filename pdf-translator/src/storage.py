@@ -78,31 +78,44 @@ def _obj_url(path):
 
 
 def ensure_bucket():
-    """Create the bucket (private) if it does not exist. Idempotent, best-effort."""
+    """Create the bucket (private) if it does not exist. Idempotent, best-effort.
+    Returns (ok, status, message). Only 200 (created) or a duplicate-name error
+    count as ok; every other response is logged with its body so a real failure
+    (bad key scope, name rejected, ...) is visible instead of silently swallowed."""
     if not enabled():
-        return
+        return False, 0, "disabled"
     try:
         r = requests.post(f"{_URL}/storage/v1/bucket",
                           headers=_headers({"Content-Type": "application/json"}),
                           data=json.dumps({"name": _BUCKET, "id": _BUCKET,
                                            "public": False}),
                           timeout=_TIMEOUT)
-        # 200 = created, 400/409 = already exists -> both fine
-        if r.status_code not in (200, 400, 409):
-            _log(f"ensure_bucket unexpected {r.status_code}: {r.text[:120]}")
+        body = r.text[:200]
+        exists = r.status_code == 409 or (
+            r.status_code == 400 and "exist" in body.lower())
+        ok = r.status_code == 200 or exists
+        if not ok:
+            _log(f"ensure_bucket {r.status_code}: {body}")
+        return ok, r.status_code, body
     except Exception as e:
         _log(f"ensure_bucket failed: {e}")
+        return False, 0, str(e)
 
 
-def _upload_bytes(path, data, content_type):
+def _upload_bytes(path, data, content_type, _retry=True):
     r = requests.post(_obj_url(path),
                       headers=_headers({"Content-Type": content_type,
                                         "x-upsert": "true"}),
                       data=data, timeout=_TIMEOUT)
-    if r.status_code not in (200, 201):
-        _log(f"upload {path} -> {r.status_code}: {r.text[:120]}")
-        return False
-    return True
+    if r.status_code in (200, 201):
+        return True
+    # bucket missing (auto-create failed at startup) -> create it now and retry
+    if _retry and "bucket not found" in r.text.lower():
+        ok, _, _ = ensure_bucket()
+        if ok:
+            return _upload_bytes(path, data, content_type, _retry=False)
+    _log(f"upload {path} -> {r.status_code}: {r.text[:120]}")
+    return False
 
 
 def upload_job(job_id, pdf_path, meta):
@@ -215,15 +228,15 @@ def selftest():
     path = "_diag/selftest.txt"
     payload = b"ok"
     try:
-        # ensure bucket
-        r = requests.post(f"{_URL}/storage/v1/bucket",
-                          headers=_headers({"Content-Type": "application/json"}),
-                          data=json.dumps({"name": _BUCKET, "id": _BUCKET,
-                                           "public": False}),
-                          timeout=_TIMEOUT)
-        out["bucket_ok"] = r.status_code in (200, 400, 409)
-        if not out["bucket_ok"]:
-            out["error"] = f"bucket create -> HTTP {r.status_code}: {r.text[:160]}"
+        # ensure bucket (records the create status so a real failure is visible)
+        b_ok, b_status, b_msg = ensure_bucket()
+        out["bucket_ok"] = b_ok
+        out["bucket_create_status"] = b_status
+        out["bucket_create_msg"] = b_msg
+        if not b_ok:
+            out["error"] = (f"bucket create -> HTTP {b_status}: {b_msg[:160]}. "
+                            f"If it says the bucket is missing, create a PRIVATE "
+                            f"bucket named '{_BUCKET}' in Supabase -> Storage.")
             return out
         # upload
         r = requests.post(_obj_url(path),
