@@ -99,10 +99,16 @@ def _matches_blob(op_norm, blob, blob_drop=None, op_norm_drop=None,
     if blob_drop is not None and op_norm_drop and len(op_norm_drop) >= 3:
         if op_norm_drop in blob_drop:
             return True
-    if blob_nodigit is not None:
-        op_nd = _DIGIT_RE.sub("", op_norm)
-        if len(op_nd) >= 4 and op_nd in blob_nodigit:
-            return True
+    # Digit-stripped match handles a citation woven INTO a BLOCK word by the
+    # extractor: the block text is garbled ("umes2o2f7ju29mping") but the actual
+    # content-stream op is CLEAN ("umesofjumping"), so it matches only after the
+    # blob's digits are stripped. Apply it ONLY to a clean op (no digits of its
+    # own): a kept op that carries digits - a table cell "Group1", "Cell2019" -
+    # is a different case and must NOT be digit-stripped, or "group"/"cell" would
+    # spuriously match the body and erase kept text.
+    if (blob_nodigit is not None and not _DIGIT_RE.search(op_norm)
+            and len(op_norm) >= 6 and op_norm in blob_nodigit):
+        return True
     return False
 
 def _op_text(op):

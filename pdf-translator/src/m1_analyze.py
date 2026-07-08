@@ -195,6 +195,11 @@ def assign_column(line, mid, left, right):
 HEAD_RE = re.compile(r"^\d+(\.\d+)*\.?\s+[A-Z]")
 CAP_RE = re.compile(r"^(Fig\.?|Figure|Table)\b", re.I)
 REF_RE = re.compile(r"^\d+\.\s+[A-Z][a-z]+")  # ref list "1. Sheppard JM..."
+# a real bibliography section heading (gates reference propagation so a numbered
+# METHODS/steps list on a body page is never mistaken for a reference list)
+REFS_HEAD_RE = re.compile(
+    r"^\s*(references|bibliography|literature\s+cited|works\s+cited|"
+    r"reference\s+list|参考文献|引用文献)\s*$", re.I)
 
 def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
     t = b["text"]
@@ -333,9 +338,9 @@ def analyze_pdf(path, name, render=True):
     ensure_out()
     doc = {"file": os.path.basename(path), "pages": []}
     pdf = pdfplumber.open(path)
-    ref_started = False   # once the reference list begins it runs to the doc end,
-                          # so this persists across pages (fixes a reference whose
-                          # last line wraps onto the next page's top)
+    ref_started = False   # inside the numbered reference list right now
+    refs_seen = False     # a "References" heading has appeared (gates propagation)
+    npages = len(pdf.pages)
     for pi, page in enumerate(pdf.pages):
         pw, ph = page.width, page.height
         chars = page.chars
@@ -357,19 +362,30 @@ def analyze_pdf(path, name, render=True):
         is_ref = sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3
         for b in blocks:
             b["type"] = classify_block(b, body_size, pi, ph, is_ref)
-        # On a reference page each entry spans several lines but only the FIRST
-        # (numbered) line matches REF_RE - the continuation lines fell through to
-        # "body" and would get translated. Once the numbered list has started in a
-        # column, every following text line in that column is part of a reference,
-        # so propagate: reference/numbered lines mark the start, and subsequent
-        # body lines become reference too. Runs only on reference pages, so normal
-        # body pages are untouched.
-        if is_ref or ref_started:
+        # A bibliography entry spans several lines but only the FIRST (numbered)
+        # line matches REF_RE; the continuation lines fell through to "body" and got
+        # translated. Once the list has started, following text lines are part of a
+        # reference, so propagate. Two guards keep this from over-reaching:
+        #   * refs_seen: only propagate AFTER a real "References" heading, so a
+        #     numbered METHODS list ("1. Prepare the sample") on a body page is not
+        #     mistaken for references.
+        #   * reset: if a later page opens with a fresh section HEADING (e.g. an
+        #     appendix / author bios after the references), we've left the reference
+        #     section - stop propagating so that content is still translated.
+        if any(REFS_HEAD_RE.match(b["text"]) for b in blocks):
+            refs_seen = True
+        # fallback for papers whose "References" heading was merged/absent: a dense
+        # numbered list in the BACK HALF of the document is the bibliography (a
+        # numbered methods list, the false-positive we guard against, is early).
+        if is_ref and pi >= npages * 0.5:
+            refs_seen = True
+        top_trans = min((b for b in blocks
+                         if b["type"] in ("body", "heading", "title", "caption")),
+                        key=lambda b: b["top"], default=None)
+        page_refy = is_ref or (ref_started and top_trans is not None
+                               and top_trans["type"] != "heading")
+        if refs_seen and page_refy:
             NUM_RE = re.compile(r"^\[?\d+[.\]]")
-            # reading order: full-width (col 0) then left then right; the reference
-            # list, once started, runs to the end across column AND page breaks, so
-            # `ref_started` carries across (a ref wrapping to the next column/page
-            # top has no number on its continuation line).
             for col in sorted({b.get("col", 0) for b in blocks}):
                 cb = sorted((b for b in blocks if b.get("col", 0) == col),
                             key=lambda b: b["top"])
@@ -378,6 +394,8 @@ def analyze_pdf(path, name, render=True):
                         b["type"] = "reference"; ref_started = True
                     elif ref_started and b["type"] in ("body", "heading"):
                         b["type"] = "reference"
+        elif refs_seen and not is_ref:
+            ref_started = False   # left the reference section (e.g. an appendix)
         # blocks directly under a "Table N" caption are table data. Also demote
         # false "headings" there (column headers like "5 Sets×Reps" match the
         # numbered-heading regex) - but keep real dotted section headings

@@ -188,7 +188,10 @@ def review(name, editor_report):
             rband = {"x0": r["x0"], "x1": r["x1"],
                      "top": (r["top"] + r["bottom"]) / 2 - 0.5,
                      "bottom": (r["top"] + r["bottom"]) / 2 + 0.5}
-            hit = next((ln for ln in lines if _rects_overlap(ln, rband, pad=-1.0)),
+            # pad=+1.0 REQUIRES the line to genuinely span the rule (>=1pt past it
+            # on both sides); a negative pad would flag text merely abutting a
+            # section separator, which is normal typesetting, not a collision.
+            hit = next((ln for ln in lines if _rects_overlap(ln, rband, pad=1.0)),
                        None)
             if hit:
                 defects.append({"role": "producer", "kind": "rule_overlap",

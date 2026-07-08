@@ -404,12 +404,20 @@ class GeminiTranslator(Translator):
         if self._circuit_broken:
             return ""                       # daily quota gone - fail fast
         last = ""
+        rate_limited = False   # exited due to a recoverable per-minute 429?
         for attempt in range(8):
             self._throttle()
-            r = requests.post(url, params={"key": self.api_key}, json=body, timeout=120)
+            try:
+                r = requests.post(url, params={"key": self.api_key}, json=body,
+                                  timeout=120)
+            except requests.RequestException as e:
+                last = type(e).__name__          # network blip - transient, retry
+                _t.sleep(min(2 ** attempt, 30))
+                continue
             if r.status_code == 200:
                 data = r.json()
-                self._fail_streak = 0
+                with self._throttle_lock:
+                    self._fail_streak = 0
                 self._ease_interval()
                 cands = data.get("candidates", [])
                 if not cands:
@@ -423,19 +431,32 @@ class GeminiTranslator(Translator):
                           "rest untranslated (try again tomorrow)", file=sys.stderr)
                     return ""
                 # recoverable per-minute cap: slow down and wait as told, keep going
-                last = "429"
+                last = "429"; rate_limited = True
                 self._bump_interval(factor=1.0, add=1.5)
-                _t.sleep(self._retry_delay(r) or min(2 ** attempt, 45))
+                d = self._retry_delay(r)
+                _t.sleep(min(d if d is not None else min(2 ** attempt, 45), 60))
                 continue
             if r.status_code in (500, 503):
-                last = f"{r.status_code}"
+                last = f"{r.status_code}"; rate_limited = False
                 _t.sleep(min(2 ** attempt, 30))
                 continue
-            r.raise_for_status()
-        # Persistent failure on THIS request: return empty (units stay English) so
-        # the job still finishes with everything else translated.
-        self._fail_streak += 1
-        if self._fail_streak >= 6 and not self._circuit_broken:
+            # any other status (400/403/404 ...): don't crash the whole job -
+            # leave this group's units in English and move on
+            print(f"[gemini] HTTP {r.status_code}: {r.text[:120]}; leaving those "
+                  f"units untranslated", file=sys.stderr)
+            return ""
+        # Exhausted retries. A pure per-minute rate-limit is RECOVERABLE - do NOT
+        # count it toward the circuit breaker (that was the "only page 2 translated"
+        # regression); just leave this group English and keep translating the rest.
+        # Only hard failures (5xx / network) accrue toward the breaker.
+        if rate_limited:
+            print("[gemini] rate-limited past retries; this group left English, "
+                  "continuing", file=sys.stderr)
+            return ""
+        with self._throttle_lock:
+            self._fail_streak += 1
+            streak = self._fail_streak
+        if streak >= 6 and not self._circuit_broken:
             self._circuit_broken = True
             print("[gemini] too many failures in a row; leaving the rest "
                   "untranslated", file=sys.stderr)

@@ -127,8 +127,11 @@ def upload_job(job_id, pdf_path, meta):
             if not _upload_bytes(f"{job_id}/{PDF_NAME}", f.read(),
                                  "application/pdf"):
                 return False
-        _upload_bytes(f"{job_id}/{META_NAME}",
-                      json.dumps(meta).encode("utf-8"), "application/json")
+        # metadata must upload too, else load_jobs() can't restore this job after a
+        # redeploy (the folder exists but job.json 404s) - report failure honestly
+        if not _upload_bytes(f"{job_id}/{META_NAME}",
+                             json.dumps(meta).encode("utf-8"), "application/json"):
+            return False
         return True
     except Exception as e:
         _log(f"upload_job {job_id} failed: {e}")
