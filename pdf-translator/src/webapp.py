@@ -196,6 +196,47 @@ def _run_job(job_id):
 ENGINE_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
 
+@app.post("/api/gemini-test")
+def gemini_test(request: Request, api_key: str = Form(""), model: str = Form("")):
+    """One real Gemini call so the user can see WHY translation produced no
+    Japanese: a 429 (rate limit), a 404 (wrong model / not enabled), an empty
+    reply (safety filter), or success. Behind the site password."""
+    import requests as _rq
+    key = (api_key or os.environ.get("GEMINI_API_KEY")
+           or os.environ.get("GOOGLE_API_KEY") or "").strip()
+    if not key:
+        return {"ok": False, "error": "APIキーが入力されていません"}
+    m = (model or os.environ.get("PDF_TRANSLATOR_GEMINI_MODEL")
+         or "gemini-2.0-flash").strip()
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{m}:generateContent")
+    body = {"contents": [{"parts": [{"text": "Translate to Japanese: Hello, world."}]}]}
+    try:
+        r = _rq.post(url, params={"key": key}, json=body, timeout=30)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "model": m}
+    out = {"http_status": r.status_code, "model": m}
+    try:
+        j = r.json()
+    except Exception:
+        return {**out, "ok": False, "raw": r.text[:300]}
+    if r.status_code == 200:
+        cands = j.get("candidates", [])
+        text = "".join(p.get("text", "") for c in cands
+                       for p in c.get("content", {}).get("parts", []))
+        out["ok"] = bool(text)
+        out["text"] = text[:200]
+        if not text:
+            out["finish_reason"] = cands[0].get("finishReason") if cands else "候補なし"
+            out["prompt_feedback"] = j.get("promptFeedback")
+    else:
+        err = j.get("error", {}) or {}
+        out["ok"] = False
+        out["error"] = (err.get("message") or "")[:400]
+        out["status_detail"] = err.get("status", "")
+    return out
+
+
 @app.post("/api/jobs")
 async def create_job(request: Request, file: UploadFile = File(...),
                      engine: str = Form("google"), api_key: str = Form("")):
@@ -417,6 +458,9 @@ button.del:disabled{opacity:.5}
            border:1px solid #8886;border-radius:6px">
     <small>Google AI Studio（aistudio.google.com）で無料発行したキーを貼り付けてください。
     この1回の翻訳にのみ使用し、サーバに保存しません。</small>
+    <button id="gtest" type="button" style="margin-top:8px;padding:6px 14px;
+       font-size:13px;background:#0891b2">キーをテスト</button>
+    <div id="gtestout" style="margin-top:8px;font-size:13px"></div>
   </div>
   <button id="go">翻訳する</button>
   <div id="status"></div>
@@ -474,6 +518,30 @@ async function deleteJob(e){
 }
 $('engine').onchange=()=>{
   $('keyrow').style.display = $('engine').value==='gemini' ? 'block' : 'none';
+};
+$('gtest').onclick=async()=>{
+  const key=$('apikey').value.trim();
+  const out=$('gtestout');
+  if(!key){out.innerHTML='<span class="err">キーを入力してください</span>';return;}
+  $('gtest').disabled=true; out.textContent='テスト中…';
+  try{
+    const fd=new FormData(); fd.append('api_key',key);
+    const j=await (await fetch('/api/gemini-test',{method:'POST',body:fd})).json();
+    if(j.ok){
+      out.innerHTML='<span style="color:#059669">✅ 成功: '+esc(j.text||'')+
+        '</span><div class="hmeta">このキーで翻訳できます。</div>';
+    }else{
+      let msg='❌ 失敗';
+      if(j.http_status===429) msg='❌ 429 レート制限（1分あたりの上限）。少し待って再試行してください。';
+      else if(j.http_status===404) msg='❌ 404 モデルが使えません（model='+esc(j.model||'')+'）。キーのプロジェクトでこのモデルが有効か確認してください。';
+      else if(j.http_status===400||j.http_status===403) msg='❌ '+j.http_status+' キーが無効か権限不足です。';
+      else if(j.finish_reason) msg='❌ 応答が空（理由: '+esc(j.finish_reason)+'）。';
+      out.innerHTML='<span class="err">'+msg+'</span>'+
+        (j.error?'<div class="hmeta">'+esc(j.error)+'</div>':'')+
+        '<div class="hmeta">HTTP '+esc(j.http_status||'')+' / '+esc(j.status_detail||'')+'</div>';
+    }
+  }catch(e){out.innerHTML='<span class="err">テスト呼び出しに失敗しました</span>';}
+  $('gtest').disabled=false;
 };
 $('go').onclick=async()=>{
   const f=$('file').files[0];
