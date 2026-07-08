@@ -1,0 +1,42 @@
+name: Deploy to Render
+
+# Triggers a Render deploy of the latest main via the service's Deploy Hook,
+# on every push to main and on manual run (Actions → Deploy to Render →
+# Run workflow). Requires ONE repository secret (settable from a phone
+# browser: GitHub → Settings → Secrets and variables → Actions):
+#   RENDER_DEPLOY_HOOK – the service's Deploy Hook URL, copied from
+#     Render dashboard → your service → Settings → Deploy Hook.
+# If the secret is absent the job is skipped, so this never breaks CI.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check secret
+        id: gate
+        run: |
+          if [ -n "${{ secrets.RENDER_DEPLOY_HOOK }}" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "RENDER_DEPLOY_HOOK not set — skipping Render deploy."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Trigger Render deploy hook
+        if: steps.gate.outputs.ok == 'true'
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          # Render returns JSON like {"deploy":{"id":"dep-..."}} on success.
+          resp=$(curl -sS -X POST -w '\n%{http_code}' "$HOOK")
+          code=$(echo "$resp" | tail -1)
+          body=$(echo "$resp" | head -n -1)
+          echo "HTTP $code: $body"
+          case "$code" in
+            2*) echo "Render deploy triggered." ;;
+            *)  echo "Deploy hook failed (HTTP $code)"; exit 1 ;;
+          esac
