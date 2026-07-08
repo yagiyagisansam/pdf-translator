@@ -158,6 +158,18 @@ def _run_job(job_id):
     # subprocess only - never written to disk or logged
     if job.get("_api_key"):
         env["GEMINI_API_KEY"] = job["_api_key"]
+    model = job.get("_gemini_model")
+    # backstop: if the user didn't run the key test, auto-pick a model that this
+    # key can actually use (free-tier availability varies; gemini-2.0-flash can be
+    # quota 0). Probe candidates once here, in this worker thread.
+    if job["engine"] == "gemini" and not model and job.get("_api_key"):
+        for cand in GEMINI_CANDIDATES:
+            ok, _info = _gemini_probe(job["_api_key"], cand)
+            if ok:
+                model = cand
+                break
+    if model:
+        env["PDF_TRANSLATOR_GEMINI_MODEL"] = model
     # 4-role orchestrator: producer -> translator -> editor -> qa (retry loop)
     cmd = [sys.executable, "-m", "roles.orchestrator",
            os.path.join(out_dir, "input.pdf"), "--name", "doc",
@@ -196,50 +208,74 @@ def _run_job(job_id):
 ENGINE_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
 
-@app.post("/api/gemini-test")
-def gemini_test(request: Request, api_key: str = Form(""), model: str = Form("")):
-    """One real Gemini call so the user can see WHY translation produced no
-    Japanese: a 429 (rate limit), a 404 (wrong model / not enabled), an empty
-    reply (safety filter), or success. Behind the site password."""
+# Candidate models to probe, best first. Free-tier availability varies by
+# account/region and changes over time (e.g. gemini-2.0-flash can report
+# "limit: 0" = not free for a given key), so we try several and use the first
+# that actually answers. Overridable with PDF_TRANSLATOR_GEMINI_MODELS (csv).
+GEMINI_CANDIDATES = [m.strip() for m in os.environ.get(
+    "PDF_TRANSLATOR_GEMINI_MODELS",
+    "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite,"
+    "gemini-2.0-flash-lite,gemini-1.5-flash,gemini-1.5-flash-8b").split(",") if m.strip()]
+
+
+def _gemini_probe(key, model):
+    """Try one generateContent call. Returns (ok, dict)."""
     import requests as _rq
-    key = (api_key or os.environ.get("GEMINI_API_KEY")
-           or os.environ.get("GOOGLE_API_KEY") or "").strip()
-    if not key:
-        return {"ok": False, "error": "APIキーが入力されていません"}
-    m = (model or os.environ.get("PDF_TRANSLATOR_GEMINI_MODEL")
-         or "gemini-2.0-flash").strip()
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{m}:generateContent")
+           f"{model}:generateContent")
     body = {"contents": [{"parts": [{"text": "Translate to Japanese: Hello, world."}]}]}
     try:
         r = _rq.post(url, params={"key": key}, json=body, timeout=30)
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "model": m}
-    out = {"http_status": r.status_code, "model": m}
+        return False, {"model": model, "error": f"{type(e).__name__}: {e}"}
+    out = {"http_status": r.status_code, "model": model}
     try:
         j = r.json()
     except Exception:
-        return {**out, "ok": False, "raw": r.text[:300]}
+        return False, {**out, "raw": r.text[:200]}
     if r.status_code == 200:
         cands = j.get("candidates", [])
         text = "".join(p.get("text", "") for c in cands
                        for p in c.get("content", {}).get("parts", []))
-        out["ok"] = bool(text)
-        out["text"] = text[:200]
-        if not text:
-            out["finish_reason"] = cands[0].get("finishReason") if cands else "候補なし"
-            out["prompt_feedback"] = j.get("promptFeedback")
-    else:
-        err = j.get("error", {}) or {}
-        out["ok"] = False
-        out["error"] = (err.get("message") or "")[:400]
-        out["status_detail"] = err.get("status", "")
-    return out
+        if text:
+            return True, {**out, "text": text[:120]}
+        return False, {**out, "finish_reason": cands[0].get("finishReason")
+                       if cands else "候補なし"}
+    err = j.get("error", {}) or {}
+    return False, {**out, "error": (err.get("message") or "")[:300],
+                   "status_detail": err.get("status", "")}
+
+
+@app.post("/api/gemini-test")
+def gemini_test(request: Request, api_key: str = Form(""), model: str = Form("")):
+    """Probe the given model (or a list of candidates) with the key so the user
+    sees WHY translation produced no Japanese - and, crucially, WHICH model
+    actually works for their key (free-tier availability varies). Behind the
+    site password; the key is used only for the probe, never stored."""
+    key = (api_key or os.environ.get("GEMINI_API_KEY")
+           or os.environ.get("GOOGLE_API_KEY") or "").strip()
+    if not key:
+        return {"ok": False, "error": "APIキーが入力されていません"}
+    models = [model.strip()] if model.strip() else GEMINI_CANDIDATES
+    tried = []
+    for m in models:
+        ok, info = _gemini_probe(key, m)
+        tried.append(info)
+        if ok:
+            return {"ok": True, "working_model": m, "text": info.get("text", ""),
+                    "tried": tried}
+    # none worked - return the first failure's detail (representative) + all tried
+    first = tried[0] if tried else {}
+    return {"ok": False, "http_status": first.get("http_status"),
+            "model": first.get("model"), "error": first.get("error", ""),
+            "status_detail": first.get("status_detail", ""),
+            "finish_reason": first.get("finish_reason"), "tried": tried}
 
 
 @app.post("/api/jobs")
 async def create_job(request: Request, file: UploadFile = File(...),
-                     engine: str = Form("google"), api_key: str = Form("")):
+                     engine: str = Form("google"), api_key: str = Form(""),
+                     model: str = Form("")):
     _sweep()
     if engine not in ("mock", "google", "gemini", "anthropic", "openai"):
         raise HTTPException(400, "unknown engine")
@@ -265,7 +301,8 @@ async def create_job(request: Request, file: UploadFile = File(...),
     JOBS[job_id] = {"status": "queued", "stage": "待機中", "error": None,
                     "result": None, "filename": file.filename or "document.pdf",
                     "engine": engine, "created": time.time(),
-                    "_api_key": api_key}  # underscore key = never persisted
+                    "_api_key": api_key,   # underscore key = never persisted
+                    "_gemini_model": (model or "").strip()}
     _persist(job_id)
     threading.Thread(target=_run_job, args=(job_id,), daemon=True).start()
     return {"id": job_id}
@@ -476,6 +513,7 @@ button.del:disabled{opacity:.5}
 <p><small>暗号化PDF・テキスト層のないスキャンPDFは未対応です。</small></p>
 <script>
 const $=id=>document.getElementById(id);
+let geminiModel='';   // set by the key test to the model that actually works
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmtDate=ts=>{const d=new Date(ts*1000);return isNaN(d)?'':
   d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()+' '+
@@ -528,17 +566,21 @@ $('gtest').onclick=async()=>{
     const fd=new FormData(); fd.append('api_key',key);
     const j=await (await fetch('/api/gemini-test',{method:'POST',body:fd})).json();
     if(j.ok){
+      geminiModel=j.working_model||'';
       out.innerHTML='<span style="color:#059669">✅ 成功: '+esc(j.text||'')+
-        '</span><div class="hmeta">このキーで翻訳できます。</div>';
+        '</span><div class="hmeta">このキーで翻訳できます。使用モデル: '+
+        esc(geminiModel)+'（翻訳時に自動で使われます）</div>';
     }else{
+      geminiModel='';
       let msg='❌ 失敗';
-      if(j.http_status===429) msg='❌ 429 レート制限（1分あたりの上限）。少し待って再試行してください。';
-      else if(j.http_status===404) msg='❌ 404 モデルが使えません（model='+esc(j.model||'')+'）。キーのプロジェクトでこのモデルが有効か確認してください。';
+      if(j.http_status===429) msg='❌ 429 上限超過。詳細は下記。';
+      else if(j.http_status===404) msg='❌ 404 どのモデルも使えませんでした。';
       else if(j.http_status===400||j.http_status===403) msg='❌ '+j.http_status+' キーが無効か権限不足です。';
       else if(j.finish_reason) msg='❌ 応答が空（理由: '+esc(j.finish_reason)+'）。';
+      const triedList=(j.tried||[]).map(t=>esc(t.model)+': '+esc(t.http_status||t.error||'')).join('<br>');
       out.innerHTML='<span class="err">'+msg+'</span>'+
         (j.error?'<div class="hmeta">'+esc(j.error)+'</div>':'')+
-        '<div class="hmeta">HTTP '+esc(j.http_status||'')+' / '+esc(j.status_detail||'')+'</div>';
+        (triedList?'<div class="hmeta">試したモデル:<br>'+triedList+'</div>':'');
     }
   }catch(e){out.innerHTML='<span class="err">テスト呼び出しに失敗しました</span>';}
   $('gtest').disabled=false;
@@ -549,7 +591,10 @@ $('go').onclick=async()=>{
   $('go').disabled=true;
   $('status').textContent='アップロード中…';
   const fd=new FormData();fd.append('file',f);fd.append('engine',$('engine').value);
-  if($('engine').value==='gemini') fd.append('api_key',$('apikey').value.trim());
+  if($('engine').value==='gemini'){
+    fd.append('api_key',$('apikey').value.trim());
+    if(geminiModel) fd.append('model',geminiModel);
+  }
   try{
     const r=await fetch('/api/jobs',{method:'POST',body:fd});
     if(!r.ok){throw new Error((await r.json()).detail||r.statusText);}
