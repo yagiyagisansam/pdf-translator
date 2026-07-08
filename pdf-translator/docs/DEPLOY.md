@@ -32,6 +32,30 @@
 
 > コードを更新して `main` にマージすると、Render が自動で再デプロイします。
 
+### 自動デプロイが動かない場合(Deploy Hook で確実に自動化)
+
+Render 側の自動デプロイ(GitHub 連携)が効かないことがあります。その場合は
+**Deploy Hook** を GitHub Actions から叩く方式に切り替えると、`main` への
+マージで確実にデプロイされます(Claude からの手動トリガーも可能になります)。
+スマホだけで設定できます:
+
+1. **Render の Deploy Hook URL をコピー**:
+   Render ダッシュボード → サービス(pdf-en-ja-translator) → **Settings** →
+   **Deploy Hook** の URL(`https://api.render.com/deploy/srv-...?key=...`)をコピー。
+2. **GitHub にシークレットとして登録**:
+   GitHub のリポジトリ → **Settings** → **Secrets and variables** → **Actions** →
+   **New repository secret** で
+   - Name: `RENDER_DEPLOY_HOOK`
+   - Secret: コピーした URL
+   を保存。
+3. 以後、`main` に push/マージされるたびに `.github/workflows/render-deploy.yml`
+   が Hook を叩いて Render がデプロイします。手動で今すぐデプロイしたい時は
+   GitHub → **Actions** → **Deploy to Render** → **Run workflow**。
+
+> シークレット未設定の間はこのワークフローは何もしません(CI は壊れません)。
+> 二重デプロイを避けたい場合は、Render 側の Settings → **Auto-Deploy** を
+> **Off** にしてください(Hook 経由のみでデプロイされるようになります)。
+
 ---
 
 ## B. Hugging Face Spaces で公開(代替・完全無料)
