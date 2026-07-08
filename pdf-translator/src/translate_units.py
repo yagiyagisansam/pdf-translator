@@ -73,10 +73,21 @@ def run(name: str, engine: str = "mock"):
     keys = [_cache_key(engine, it) for it in items]
     results = [cache.get(k) for k in keys]
 
+    def _safe_batch(fn, batch):
+        """Never let an engine/network exception crash the whole run - a raise
+        here would discard every already-translated unit. Degrade to untranslated
+        (English preserved downstream) instead."""
+        try:
+            return fn(batch)
+        except Exception as e:
+            print(f"[{name}] translation engine error ({type(e).__name__}: {e}); "
+                  f"leaving {len(batch)} unit(s) untranslated", file=sys.stderr)
+            return [None] * len(batch)
+
     miss = [i for i, r in enumerate(results) if not r]
     direct = {}  # index -> final Japanese produced from UNMASKED source
     if miss:
-        fresh = translator.translate_batch([items[i] for i in miss])
+        fresh = _safe_batch(translator.translate_batch, [items[i] for i in miss])
         for i, r in zip(miss, fresh):
             results[i] = r
         if validate:
@@ -87,7 +98,7 @@ def run(name: str, engine: str = "mock"):
                 print(f"[{name}] retrying {len(bad)} unit(s) with broken ⟦Tn⟧ placeholders",
                       file=sys.stderr)
                 retry = getattr(translator, "translate_batch_fine", translator.translate_batch)
-                redo = retry([items[i] for i in bad])
+                redo = _safe_batch(retry, [items[i] for i in bad])
                 for i, r in zip(bad, redo):
                     results[i] = r
             still = [i for i in miss
@@ -98,7 +109,7 @@ def run(name: str, engine: str = "mock"):
             # UNMASKED source and accept it only if every protected number
             # survived verbatim - better Japanese than leaving English.
             if still and getattr(translator, "SUPPORTS_UNMASKED_FALLBACK", False):
-                outs = translator.translate_batch(
+                outs = _safe_batch(translator.translate_batch,
                     [{"text": units[i]["source"], "kind": items[i]["kind"]} for i in still])
                 for i, out in zip(still, outs):
                     if out and _digits_ok(units[i]["tokens"].values(), out):

@@ -211,8 +211,10 @@ def _run_job(job_id):
             job["note"] = (f"{total_n}件中{done_n}件を翻訳しました。"
                            f"{reason}、残りは英語のままです。"
                            f"（Google翻訳エンジンで再実行するか、時間をおいてお試しください）")
-        # mirror to Supabase so it survives a redeploy (no-op if not configured)
-        if storage.enabled():
+        # mirror to Supabase so it survives a redeploy (no-op if not configured).
+        # Re-check _deleted right before the upload: a delete can land between the
+        # earlier check and here, and we must not re-create what it removed.
+        if storage.enabled() and not job.get("_deleted"):
             meta = {k: job.get(k) for k in _PERSIST_KEYS}
             if storage.upload_job(job_id, result, meta):
                 job["stored"] = True

@@ -411,8 +411,9 @@ class GeminiTranslator(Translator):
                 r = requests.post(url, params={"key": self.api_key}, json=body,
                                   timeout=120)
             except requests.RequestException as e:
-                last = type(e).__name__          # network blip - transient, retry
-                _t.sleep(min(2 ** attempt, 30))
+                last = type(e).__name__          # network blip - a HARD failure,
+                rate_limited = False             # not a rate limit: must be able to
+                _t.sleep(min(2 ** attempt, 30))  # trip the breaker if it persists
                 continue
             if r.status_code == 200:
                 data = r.json()

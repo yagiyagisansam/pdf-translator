@@ -107,7 +107,7 @@ def _matches_blob(op_norm, blob, blob_drop=None, op_norm_drop=None,
     # is a different case and must NOT be digit-stripped, or "group"/"cell" would
     # spuriously match the body and erase kept text.
     if (blob_nodigit is not None and not _DIGIT_RE.search(op_norm)
-            and len(op_norm) >= 6 and op_norm in blob_nodigit):
+            and len(op_norm) >= 4 and op_norm in blob_nodigit):
         return True
     return False
 

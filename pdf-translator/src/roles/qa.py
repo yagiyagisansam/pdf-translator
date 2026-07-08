@@ -188,10 +188,11 @@ def review(name, editor_report):
             rband = {"x0": r["x0"], "x1": r["x1"],
                      "top": (r["top"] + r["bottom"]) / 2 - 0.5,
                      "bottom": (r["top"] + r["bottom"]) / 2 + 0.5}
-            # pad=+1.0 REQUIRES the line to genuinely span the rule (>=1pt past it
-            # on both sides); a negative pad would flag text merely abutting a
-            # section separator, which is normal typesetting, not a collision.
-            hit = next((ln for ln in lines if _rects_overlap(ln, rband, pad=1.0)),
+            # pad=0 = neutral overlap: the line's bbox must actually include the
+            # rule band (genuine crossing), but a line merely abutting the rule
+            # (bbox edge exactly at it) is not flagged. A negative pad over-reports
+            # (flags adjacent text); a large positive pad under-reports.
+            hit = next((ln for ln in lines if _rects_overlap(ln, rband, pad=0.0)),
                        None)
             if hit:
                 defects.append({"role": "producer", "kind": "rule_overlap",
