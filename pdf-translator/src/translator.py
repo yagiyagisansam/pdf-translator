@@ -328,13 +328,20 @@ class GeminiTranslator(Translator):
         if max_workers is None:
             max_workers = int(os.environ.get("PDF_TRANSLATOR_GEMINI_WORKERS", "1"))
         self.max_workers = max_workers
-        self.min_interval = float(
-            os.environ.get("PDF_TRANSLATOR_GEMINI_MIN_INTERVAL", "4.5"))
+        # Requests are spaced >= min_interval apart. The free tier is per-MINUTE
+        # limited (~10 RPM for the flash models), so start conservatively; the
+        # interval also ADAPTS UP on a 429 to self-tune below whatever the real cap
+        # is, and decays back toward the base after sustained success.
+        self.base_interval = float(
+            os.environ.get("PDF_TRANSLATOR_GEMINI_MIN_INTERVAL", "6.0"))
+        self.min_interval = self.base_interval
         self._throttle_lock = threading.Lock()
         self._last_call = 0.0
-        # circuit breaker: after this many requests fail in a row (e.g. the daily
-        # quota is exhausted), stop trying and leave the rest untranslated fast,
-        # instead of burning a minute of retries on every remaining group.
+        # circuit breaker: only trips when the DAILY quota is exhausted (won't
+        # recover today) or after many hard failures in a row - NOT on ordinary
+        # per-minute 429s, which are retried with backoff so the whole doc still
+        # translates (the earlier "only page 2 translated" was the breaker giving
+        # up on recoverable rate limits).
         self._fail_streak = 0
         self._circuit_broken = False
 
@@ -367,6 +374,24 @@ class GeminiTranslator(Translator):
             pass
         return None
 
+    @staticmethod
+    def _is_daily_quota(r):
+        """True if a 429 is the DAILY free-tier quota (won't recover today) rather
+        than the recoverable per-minute cap."""
+        try:
+            t = r.text.lower()
+        except Exception:
+            return False
+        return "perday" in t or "per day" in t or "requests_per_day" in t
+
+    def _bump_interval(self, factor=1.5, add=0.0, cap=25.0):
+        with self._throttle_lock:
+            self.min_interval = min(cap, self.min_interval * factor + add)
+
+    def _ease_interval(self):
+        with self._throttle_lock:
+            self.min_interval = max(self.base_interval, self.min_interval * 0.97)
+
     def _complete(self, prompt, max_tokens):
         import time as _t
         import requests
@@ -377,38 +402,45 @@ class GeminiTranslator(Translator):
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": max_tokens},
         }
         if self._circuit_broken:
-            return ""                       # quota likely exhausted - fail fast
+            return ""                       # daily quota gone - fail fast
         last = ""
-        for attempt in range(5):
+        for attempt in range(8):
             self._throttle()
             r = requests.post(url, params={"key": self.api_key}, json=body, timeout=120)
             if r.status_code == 200:
                 data = r.json()
                 self._fail_streak = 0
+                self._ease_interval()
                 cands = data.get("candidates", [])
                 if not cands:
                     return ""
                 parts = cands[0].get("content", {}).get("parts", [])
                 return "".join(p.get("text", "") for p in parts).strip()
-            if r.status_code in (429, 500, 503):     # rate-limited / transient
+            if r.status_code == 429:
+                if self._is_daily_quota(r):
+                    self._circuit_broken = True
+                    print("[gemini] daily free-tier quota exhausted; leaving the "
+                          "rest untranslated (try again tomorrow)", file=sys.stderr)
+                    return ""
+                # recoverable per-minute cap: slow down and wait as told, keep going
+                last = "429"
+                self._bump_interval(factor=1.0, add=1.5)
+                _t.sleep(self._retry_delay(r) or min(2 ** attempt, 45))
+                continue
+            if r.status_code in (500, 503):
                 last = f"{r.status_code}"
-                delay = self._retry_delay(r)
-                if delay is None:
-                    delay = min(2 ** attempt, 30)
-                _t.sleep(delay)
+                _t.sleep(min(2 ** attempt, 30))
                 continue
             r.raise_for_status()
-        # Give up on THIS request without crashing the whole job: return empty so
-        # the affected units stay in English (the layout step flows around them or
-        # leaves the page as-is) instead of losing every already-translated unit.
+        # Persistent failure on THIS request: return empty (units stay English) so
+        # the job still finishes with everything else translated.
         self._fail_streak += 1
-        if self._fail_streak >= 4 and not self._circuit_broken:
+        if self._fail_streak >= 6 and not self._circuit_broken:
             self._circuit_broken = True
-            print("[gemini] too many failures in a row (quota likely exhausted); "
-                  "leaving the remaining units untranslated", file=sys.stderr)
+            print("[gemini] too many failures in a row; leaving the rest "
+                  "untranslated", file=sys.stderr)
         else:
-            print(f"[gemini] request failed after retries ({last}); leaving those "
-                  f"units untranslated", file=sys.stderr)
+            print(f"[gemini] request failed after retries ({last})", file=sys.stderr)
         return ""
 
     def translate_batch(self, items):
