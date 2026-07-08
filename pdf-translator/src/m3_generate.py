@@ -135,6 +135,12 @@ _FRAG_RE = re.compile(
     r"^(?:[a-d]|p|t|n|es|no|to|of|in|the|and|or|vs|"
     r"\d{1,4}|\d{1,3}[-–,]\d{1,3}|[±×<>=]+)$", re.I)
 
+# Longest run of consecutive fragment ops the pass-2 sweep will drop as a single
+# paragraph-internal cluster. Real clusters (author markers a-e, woven citations)
+# are short; a longer contiguous run of frags is structured content (a numeric
+# table) that must survive even when sandwiched between translated paragraphs.
+_MAX_FRAG_RUN = 6
+
 def _parse_tounicode(data):
     """Parse a /ToUnicode CMap stream into {code:int -> unicode:str}. Handles the
     common bfchar / bfrange forms; unknown constructs are skipped."""
@@ -274,7 +280,14 @@ def remove_text_by_content(page, owner, kill_blob, **kwargs):
         r=k+1
         while r<len(text_idx) and _is_frag(text_idx[r]): r+=1
         nextd = r<len(text_idx) and dropped[text_idx[r]]
-        if prevd and nextd:
+        # A paragraph-internal fragment cluster (superscript cites, author
+        # markers, stat symbols) is SHORT. A long run of fragments wedged between
+        # two translated paragraphs is structured content - a numeric table drawn
+        # in stream order between body paragraphs, e.g. a grid of cells like
+        # "12","34","5-10" that all match _FRAG_RE - and must be preserved, not
+        # swept. Bound the run length so tables survive while real clusters die.
+        run_len = (r - 1) - (l + 1) + 1   # count of consecutive frags l+1..r-1
+        if prevd and nextd and run_len <= _MAX_FRAG_RUN:
             dropped[i]=True
     out=[op for i,op in enumerate(ops) if not dropped[i]]
     page.Contents = owner.make_stream(unparse_content_stream(out))

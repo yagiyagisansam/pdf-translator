@@ -218,6 +218,13 @@ def _run_job(job_id):
             meta = {k: job.get(k) for k in _PERSIST_KEYS}
             if storage.upload_job(job_id, result, meta):
                 job["stored"] = True
+            # upload_job is a multi-second network call; a delete can land WHILE
+            # it runs, after its own storage.delete_job() already swept the bucket.
+            # Our upload would then resurrect the job on the next redeploy, so if a
+            # delete landed during the upload, remove the copy we just wrote.
+            if job.get("_deleted"):
+                storage.delete_job(job_id)
+                return
     else:
         job["status"] = "error"
         # surface the pipeline's own message (e.g. encrypted / scanned PDF)
