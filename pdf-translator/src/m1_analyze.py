@@ -336,6 +336,7 @@ def analyze_pdf(path, name, render=True):
     ref_started = False   # once the reference list begins it runs to the doc end,
                           # so this persists across pages (a reference whose last
                           # line wraps onto the next page's top has no number)
+    npages = len(pdf.pages)
     for pi, page in enumerate(pdf.pages):
         pw, ph = page.width, page.height
         chars = page.chars
@@ -362,10 +363,11 @@ def analyze_pdf(path, name, render=True):
         # translated. Once the numbered list has started it runs to the document end,
         # so propagate: reference/numbered lines mark the start (sticky across column
         # AND page breaks - a ref wrapping to the next column/page top has no number),
-        # and subsequent body/heading lines become reference too. `ref_started` is
-        # only ever set inside a page that already qualified as a reference zone
-        # (is_ref), so a stray numbered line on a pure body page cannot start it.
-        if is_ref or ref_started:
+        # and subsequent body/heading lines become reference too. Only allow this
+        # in the BACK HALF of the document: bibliographies live at the end, whereas
+        # a numbered METHODS/protocol list ("1. Participants were...") is early and
+        # would otherwise poison every following page as "reference" (untranslated).
+        if (is_ref or ref_started) and pi >= npages * 0.5:
             NUM_RE = re.compile(r"^\[?\d+[.\]]")
             for col in sorted({b.get("col", 0) for b in blocks}):
                 cb = sorted((b for b in blocks if b.get("col", 0) == col),
