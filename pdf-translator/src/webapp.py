@@ -48,7 +48,8 @@ SELF_URL = (os.environ.get("RENDER_EXTERNAL_URL")
 app = FastAPI(title="PDF EN→JA Translator")
 JOBS = {}  # job_id -> {status, stage, error, result, filename, created}
 _slots = threading.Semaphore(MAX_PARALLEL)
-_PERSIST_KEYS = ("status", "stage", "error", "result", "filename", "engine", "created")
+_PERSIST_KEYS = ("status", "stage", "error", "result", "filename", "engine",
+                 "created", "note")
 
 
 def _job_file(job_id):
@@ -175,6 +176,8 @@ def _run_job(job_id):
            os.path.join(out_dir, "input.pdf"), "--name", "doc",
            "--engine", job["engine"]]
     tail = []
+    xlated = None            # (done, total) parsed from "translated X/Y units"
+    quota_hit = False        # Gemini daily free-tier quota was exhausted mid-job
     with _slots:
         job["status"] = "running"
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -183,6 +186,11 @@ def _run_job(job_id):
         for line in proc.stdout:
             line = line.rstrip()
             tail = (tail + [line])[-8:]
+            mt = re.search(r"translated\s+(\d+)/(\d+)\s+units", line)
+            if mt:
+                xlated = (int(mt.group(1)), int(mt.group(2)))
+            if "quota exhausted" in line or "RESOURCE_EXHAUSTED" in line:
+                quota_hit = True
             label = _stage_label(line)
             if label:
                 job["stage"] = label
@@ -192,6 +200,15 @@ def _run_job(job_id):
         job["status"] = "done"
         job["stage"] = "完了"
         job["result"] = result
+        # warn if a big chunk stayed English so the user knows WHY (usually the
+        # Gemini free-tier limit), instead of a silent all-English result
+        if xlated and xlated[1] and xlated[0] / xlated[1] < 0.9:
+            done_n, total_n = xlated
+            reason = ("Gemini無料枠の1日の上限に達したため" if quota_hit
+                      else "翻訳エンジンが一部応答しなかったため")
+            job["note"] = (f"{total_n}件中{done_n}件を翻訳しました。"
+                           f"{reason}、残りは英語のままです。"
+                           f"（Google翻訳エンジンで再実行するか、時間をおいてお試しください）")
         # mirror to Supabase so it survives a redeploy (no-op if not configured)
         if storage.enabled():
             meta = {k: job.get(k) for k in _PERSIST_KEYS}
@@ -357,7 +374,7 @@ def job_status(job_id: str, request: Request):
     if not job:
         raise HTTPException(404, "no such job")
     return {"id": job_id, "status": job["status"], "stage": job["stage"],
-            "error": job["error"]}
+            "error": job["error"], "note": job.get("note")}
 
 
 @app.get("/api/jobs/{job_id}/download")
@@ -616,7 +633,8 @@ $('go').onclick=async()=>{
       miss=0;
       if(j.status==='done'){
         $('status').innerHTML='完了 <a class="dl" href="/api/jobs/'+id+
-          '/download">日本語PDFをダウンロード</a>';
+          '/download">日本語PDFをダウンロード</a>'+
+          (j.note?'<div style="margin-top:8px;color:#b45309">⚠ '+esc(j.note)+'</div>':'');
         loadHistory();
         break;
       }
