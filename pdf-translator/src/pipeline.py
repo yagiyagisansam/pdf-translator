@@ -31,9 +31,20 @@ def validate_pdf(pdf_path):
     except Exception as e:
         raise UnsupportedPdfError(f"cannot open as PDF: {e}")
     if rd.is_encrypted:
-        raise UnsupportedPdfError(
-            "encrypted/password-protected PDFs are not supported "
-            "(暗号化されたPDFは未対応です)")
+        # Many publisher PDFs are "encrypted" with an EMPTY user password (owner
+        # password only, to restrict printing) yet open and read fine. Only reject
+        # when an empty-password decrypt fails - i.e. a real password is required.
+        try:
+            if rd.decrypt("") == 0:      # 0 = wrong password / not decryptable
+                raise UnsupportedPdfError(
+                    "password-protected PDFs are not supported "
+                    "(パスワード保護されたPDFは未対応です)")
+        except UnsupportedPdfError:
+            raise
+        except Exception:
+            raise UnsupportedPdfError(
+                "encrypted PDF could not be opened "
+                "(暗号化されたPDFを開けませんでした)")
     import pdfplumber
     with pdfplumber.open(pdf_path) as pdf:
         if len(pdf.pages) == 0:

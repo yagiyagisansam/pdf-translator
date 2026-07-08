@@ -334,8 +334,9 @@ def analyze_pdf(path, name, render=True):
     doc = {"file": os.path.basename(path), "pages": []}
     pdf = pdfplumber.open(path)
     ref_started = False   # once the reference list begins it runs to the doc end,
-                          # so this persists across pages (fixes a reference whose
-                          # last line wraps onto the next page's top)
+                          # so this persists across pages (a reference whose last
+                          # line wraps onto the next page's top has no number)
+    npages = len(pdf.pages)
     for pi, page in enumerate(pdf.pages):
         pw, ph = page.width, page.height
         chars = page.chars
@@ -357,19 +358,17 @@ def analyze_pdf(path, name, render=True):
         is_ref = sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3
         for b in blocks:
             b["type"] = classify_block(b, body_size, pi, ph, is_ref)
-        # On a reference page each entry spans several lines but only the FIRST
-        # (numbered) line matches REF_RE - the continuation lines fell through to
-        # "body" and would get translated. Once the numbered list has started in a
-        # column, every following text line in that column is part of a reference,
-        # so propagate: reference/numbered lines mark the start, and subsequent
-        # body lines become reference too. Runs only on reference pages, so normal
-        # body pages are untouched.
-        if is_ref or ref_started:
+        # A bibliography entry spans several lines but only the FIRST (numbered)
+        # line matches REF_RE; the continuation lines fell through to "body" and got
+        # translated. Once the numbered list has started it runs to the document end,
+        # so propagate: reference/numbered lines mark the start (sticky across column
+        # AND page breaks - a ref wrapping to the next column/page top has no number),
+        # and subsequent body/heading lines become reference too. Only allow this
+        # in the BACK HALF of the document: bibliographies live at the end, whereas
+        # a numbered METHODS/protocol list ("1. Participants were...") is early and
+        # would otherwise poison every following page as "reference" (untranslated).
+        if (is_ref or ref_started) and pi >= npages * 0.5:
             NUM_RE = re.compile(r"^\[?\d+[.\]]")
-            # reading order: full-width (col 0) then left then right; the reference
-            # list, once started, runs to the end across column AND page breaks, so
-            # `ref_started` carries across (a ref wrapping to the next column/page
-            # top has no number on its continuation line).
             for col in sorted({b.get("col", 0) for b in blocks}):
                 cb = sorted((b for b in blocks if b.get("col", 0) == col),
                             key=lambda b: b["top"])

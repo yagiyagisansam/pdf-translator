@@ -90,9 +90,12 @@ def _load_jobs():
 
 
 def _sweep():
-    """Delete job dirs older than the TTL."""
+    """Delete job dirs older than the TTL. Never touches a queued/running job -
+    its worker thread is still reading/writing that directory."""
     cutoff = time.time() - JOB_TTL_H * 3600
     for jid, job in list(JOBS.items()):
+        if job.get("status") in ("queued", "running"):
+            continue
         if job.get("created", 0) < cutoff:
             shutil.rmtree(os.path.join(JOBS_DIR, jid), ignore_errors=True)
             storage.delete_job(jid)
@@ -162,13 +165,10 @@ def _run_job(job_id):
     model = job.get("_gemini_model")
     # backstop: if the user didn't run the key test, auto-pick a model that this
     # key can actually use (free-tier availability varies; gemini-2.0-flash can be
-    # quota 0). Probe candidates once here, in this worker thread.
+    # quota 0). Probe candidates once, and CACHE the result per key so we don't
+    # burn a probe request (against the scarce free-tier quota) on every job.
     if job["engine"] == "gemini" and not model and job.get("_api_key"):
-        for cand in GEMINI_CANDIDATES:
-            ok, _info = _gemini_probe(job["_api_key"], cand)
-            if ok:
-                model = cand
-                break
+        model = _gemini_working_model(job["_api_key"])
     if model:
         env["PDF_TRANSLATOR_GEMINI_MODEL"] = model
     # 4-role orchestrator: producer -> translator -> editor -> qa (retry loop)
@@ -196,6 +196,8 @@ def _run_job(job_id):
                 job["stage"] = label
         proc.wait()
     result = os.path.join(out_dir, "doc_ja.pdf")
+    if job.get("_deleted"):
+        return   # user deleted this job mid-run; don't re-create its files/metadata
     if proc.returncode == 0 and os.path.exists(result):
         job["status"] = "done"
         job["stage"] = "完了"
@@ -209,11 +211,20 @@ def _run_job(job_id):
             job["note"] = (f"{total_n}件中{done_n}件を翻訳しました。"
                            f"{reason}、残りは英語のままです。"
                            f"（Google翻訳エンジンで再実行するか、時間をおいてお試しください）")
-        # mirror to Supabase so it survives a redeploy (no-op if not configured)
-        if storage.enabled():
+        # mirror to Supabase so it survives a redeploy (no-op if not configured).
+        # Re-check _deleted right before the upload: a delete can land between the
+        # earlier check and here, and we must not re-create what it removed.
+        if storage.enabled() and not job.get("_deleted"):
             meta = {k: job.get(k) for k in _PERSIST_KEYS}
             if storage.upload_job(job_id, result, meta):
                 job["stored"] = True
+            # upload_job is a multi-second network call; a delete can land WHILE
+            # it runs, after its own storage.delete_job() already swept the bucket.
+            # Our upload would then resurrect the job on the next redeploy, so if a
+            # delete landed during the upload, remove the copy we just wrote.
+            if job.get("_deleted"):
+                storage.delete_job(job_id)
+                return
     else:
         job["status"] = "error"
         # surface the pipeline's own message (e.g. encrypted / scanned PDF)
@@ -263,6 +274,35 @@ def _gemini_probe(key, model):
                    "status_detail": err.get("status", "")}
 
 
+# Cache the model that works for a given key so we don't spend a probe request
+# (scarce on the free tier) on every job. Keyed by a hash of the key, not the key.
+_GEMINI_MODEL_CACHE = {}
+_GEMINI_MODEL_LOCK = threading.Lock()
+
+
+def _key_hash(key):
+    import hashlib
+    return hashlib.sha256((key or "").encode()).hexdigest()[:16]
+
+
+def _gemini_working_model(key):
+    """Model this key can use, cached. Probes candidates on a cache miss."""
+    kh = _key_hash(key)
+    with _GEMINI_MODEL_LOCK:
+        if kh in _GEMINI_MODEL_CACHE:
+            return _GEMINI_MODEL_CACHE[kh]
+    model = None
+    for cand in GEMINI_CANDIDATES:
+        ok, _info = _gemini_probe(key, cand)
+        if ok:
+            model = cand
+            break
+    if model:
+        with _GEMINI_MODEL_LOCK:
+            _GEMINI_MODEL_CACHE[kh] = model
+    return model
+
+
 @app.post("/api/gemini-test")
 def gemini_test(request: Request, api_key: str = Form(""), model: str = Form("")):
     """Probe the given model (or a list of candidates) with the key so the user
@@ -279,6 +319,8 @@ def gemini_test(request: Request, api_key: str = Form(""), model: str = Form("")
         ok, info = _gemini_probe(key, m)
         tried.append(info)
         if ok:
+            with _GEMINI_MODEL_LOCK:
+                _GEMINI_MODEL_CACHE[_key_hash(key)] = m   # reuse for the job
             return {"ok": True, "working_model": m, "text": info.get("text", ""),
                     "tried": tried}
     # none worked - return the first failure's detail (representative) + all tried
@@ -305,9 +347,21 @@ async def create_job(request: Request, file: UploadFile = File(...),
                                    or os.environ.get("GOOGLE_API_KEY")):
         raise HTTPException(400, "Gemini APIキーを入力してください（Google AI Studio "
                                  "で無料発行できます）")
-    data = await file.read()
-    if len(data) > MAX_UPLOAD_MB * 1024 * 1024:
+    # reject oversize BEFORE buffering the whole body into RAM (memory DoS guard)
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    try:
+        clen = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        clen = 0
+    if clen > limit:
         raise HTTPException(413, f"file exceeds {MAX_UPLOAD_MB}MB")
+    # stream-read with a hard cap in case Content-Length is absent or lies
+    data, chunk = b"", True
+    while chunk:
+        chunk = await file.read(1024 * 1024)
+        data += chunk
+        if len(data) > limit:
+            raise HTTPException(413, f"file exceeds {MAX_UPLOAD_MB}MB")
     if not data.startswith(b"%PDF"):
         raise HTTPException(400, "not a PDF file")
     job_id = uuid.uuid4().hex[:12]
@@ -330,9 +384,10 @@ def diag(request: Request):
     """One-tap health check for the save/restore path. Open this URL in the phone
     browser: it says whether Supabase is wired up and whether a real upload works,
     so a broken key/bucket is obvious without digging through Render logs."""
-    done = sum(1 for j in JOBS.values() if j.get("status") == "done")
+    snap = list(JOBS.values())   # snapshot: JOBS is mutated by other threads
+    done = sum(1 for j in snap if j.get("status") == "done")
     return {
-        "jobs_total": len(JOBS),
+        "jobs_total": len(snap),
         "jobs_done": done,
         "jobs_dir": JOBS_DIR,
         "jobs_dir_exists": os.path.isdir(JOBS_DIR),
@@ -349,7 +404,7 @@ def list_jobs(request: Request):
     password, so in "only me" mode this is your private list."""
     items = []
     remote_on = storage.enabled()
-    for jid, job in JOBS.items():
+    for jid, job in list(JOBS.items()):   # snapshot: other threads mutate JOBS
         result = job.get("result") or os.path.join(JOBS_DIR, jid, "doc_ja.pdf")
         done = job.get("status") == "done"
         # downloadable if the PDF is on local disk OR mirrored to Supabase
@@ -385,7 +440,10 @@ def job_download(job_id: str, request: Request):
     if job["status"] != "done":
         raise HTTPException(409, "job not finished")
     base = os.path.splitext(os.path.basename(job["filename"]))[0]
-    dl_name = f"{base}_ja.pdf"
+    # sanitize for a safe Content-Disposition value: drop CR/LF/quotes/control
+    # chars (header injection) and cap length
+    safe_base = re.sub(r'[\r\n"\\\x00-\x1f]', "", base)[:100] or "document"
+    dl_name = f"{safe_base}_ja.pdf"
     local = os.path.join(JOBS_DIR, job_id, "doc_ja.pdf")
     result = job.get("result") or local
     if os.path.exists(result):
@@ -410,8 +468,10 @@ def job_download(job_id: str, request: Request):
 def job_delete(job_id: str, request: Request):
     """Delete a translated PDF: remove its local files, its Supabase copy (if any),
     and drop it from the history. Behind the site password like everything else."""
-    if job_id not in JOBS:
+    job = JOBS.get(job_id)
+    if job is None:
         raise HTTPException(404, "no such job")
+    job["_deleted"] = True   # tells a still-running worker not to re-upload/persist
     shutil.rmtree(os.path.join(JOBS_DIR, job_id), ignore_errors=True)
     storage.delete_job(job_id)
     JOBS.pop(job_id, None)
@@ -419,7 +479,8 @@ def job_delete(job_id: str, request: Request):
 
 
 def _has_active_job():
-    return any(j.get("status") in ("queued", "running") for j in JOBS.values())
+    # snapshot: JOBS is mutated by request/worker threads while we iterate
+    return any(j.get("status") in ("queued", "running") for j in list(JOBS.values()))
 
 
 def _keepalive_loop():
@@ -639,13 +700,13 @@ $('go').onclick=async()=>{
         break;
       }
       if(j.status==='error'){
-        $('status').innerHTML='<span class="err">失敗: '+j.error+'</span>';
+        $('status').innerHTML='<span class="err">失敗: '+esc(j.error||'')+'</span>';
         loadHistory();
         break;
       }
       $('status').textContent=j.stage+'…';
     }
-  }catch(e){$('status').innerHTML='<span class="err">'+e.message+'</span>';}
+  }catch(e){$('status').innerHTML='<span class="err">'+esc(e.message||'エラー')+'</span>';}
   $('go').disabled=false;
 };
 loadHistory();

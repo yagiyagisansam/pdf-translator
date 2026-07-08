@@ -39,7 +39,9 @@ def convert(pdf_path, name, engine="google", max_rounds=3, progress=None):
 
     floor = 5.5
     report = None
-    for rnd in range(1, max_rounds + 1):
+    verdict = {"ok": False, "defects": []}
+    rnd = 0
+    for rnd in range(1, max(1, max_rounds) + 1):
         _emit(progress, "editor", f"配置 (round {rnd})")
         report = editor.build(name, pdf_path, floor=floor)
 
@@ -50,22 +52,26 @@ def convert(pdf_path, name, engine="google", max_rounds=3, progress=None):
             return {"out_path": report["out_path"], "rounds": rnd,
                     "ok": True, "defects": []}
 
-        # map defects to fixes for the next round
-        roles_hit = {d["role"] for d in verdict["defects"]}
-        params = {d["param"] for d in verdict["defects"]}
+        # map defects to fixes for the next round (defensive .get for the contract)
+        params = {d.get("param") for d in verdict["defects"]}
         _emit(progress, "qa", "不適合→修正: "
-              + "; ".join(d["detail"] for d in verdict["defects"])[:200])
-        if "shrink" in params:
-            floor = max(4.5, floor - 1.0)
+              + "; ".join(d.get("detail", "") for d in verdict["defects"])[:200])
+        changed = False
+        if "shrink" in params and floor > 4.5:
+            floor = max(4.5, floor - 1.0); changed = True
         if "reengine" in params and engine == "google" and os.environ.get("ANTHROPIC_API_KEY"):
             engine = "anthropic"  # escalate translation quality if a key exists
             _emit(progress, "translator", "再翻訳 (anthropic)")
             translator_role.translate(name, engine)
             make_jp_font_for(name)
-        # 'restrip' is handled by re-running editor.build (idempotent) next round
+            changed = True
+        # If nothing actionable changed, another round would rebuild identical
+        # output and re-raise identical defects - stop early instead of spinning.
+        if not changed:
+            break
 
     _emit(progress, "done", f"未解決の指摘ありで出力 ({len(verdict['defects'])}件)")
-    return {"out_path": report["out_path"], "rounds": max_rounds,
+    return {"out_path": report["out_path"], "rounds": rnd,
             "ok": False, "defects": verdict["defects"]}
 
 
