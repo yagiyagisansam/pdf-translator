@@ -18,10 +18,21 @@ PROTECT_PATTERNS = [
     ("EMAIL", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")),
     # citation markers like "4–6", "1,2", "7,17–19" possibly superscripted in source
     ("CITE",  re.compile(r"(?<=[a-zA-Z\)\.])\d{1,3}(?:[–\-,]\d{1,3})*(?=[\s\.,;:\)]|$)")),
-    # numeric values with optional ± and units (e.g. 2.7 ± 0.7 cm, 250 Hz, 10 kg, p < 0.01)
+    # numeric values with optional ± and units (e.g. 2.7 ± 0.7 cm, 250 Hz, 10 kg, p < 0.01).
+    # (?![A-Za-z]) stops a unit from eating the first letter of a WORD:
+    # without it "71 million" masked as "71 m" + "illion" and the translation
+    # of the mangled remainder was garbage.
     ("NUM",   re.compile(r"[<>≈=]?\s?\d[\d.,]*\s?(?:±\s?\d[\d.,]*)?\s?"
-                         r"(?:%|cm|mm|m|kg|g|s|ms|Hz|N|m/s2?|°|yrs?|kg/m2|weeks?)?")),
-    ("ABBR",  re.compile(r"\b(?:CMVJ|SPJ|AFTE|SPAD|NAMI|NASA|ICC|ES|QA|AVT|3D)\b")),
+                         r"(?:%|cm|mm|m|kg|g|s|ms|Hz|N|m/s2?|°|yrs?|kg/m2|weeks?)?"
+                         r"(?![A-Za-z0-9])")),
+    # bare web/domain names (leonardo.com) - a URL pattern without the scheme
+    ("SITE",  re.compile(r"\b[\w-]+(?:\.[\w-]+)*"
+                         r"\.(?:com|org|net|io|gov|edu|info|co\.[a-z]{2})\b")),
+    # universal technical/aviation abbreviations a literal MT engine mangles
+    # ("HIGE" -> beard). Domain constants, not per-document tuning.
+    ("ABBR",  re.compile(r"\b(?:CMVJ|SPJ|AFTE|SPAD|NAMI|NASA|ICC|ES|QA|AVT|3D|"
+                         r"ISA|VFR|IFR|FAA|EASA|HIGE|HOGE|OEI|MGW|MCP|IGE|OGE|"
+                         r"NVG|AFCS|HUMS|SAR|FADEC|SATCOM|MoD)\b")),
     # product/model designators (AW101, EH101, CT7-8E, UK24 ...): keep verbatim so
     # no engine can transliterate or split them
     ("MODEL", re.compile(r"\b[A-Z]{1,5}\d{1,4}(?:-\d+[A-Z]*|-[A-Z]+\d*)?\b")),

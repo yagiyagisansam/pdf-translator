@@ -221,6 +221,27 @@ def _decode_op(op, cur_font, decoders):
     return "".join(out)
 
 
+def _form_xobjects(res, seen):
+    """Form XObjects reachable from a Resources dict (one level's worth)."""
+    out = []
+    try:
+        xobjs = res.XObject
+    except Exception:
+        return out
+    for name, xo in xobjs.items():
+        try:
+            if str(xo.get("/Subtype", "")) != "/Form":
+                continue
+            key = (xo.objgen if xo.is_indirect else id(xo))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(xo)
+        except Exception:
+            continue
+    return out
+
+
 def remove_text_by_content(page, owner, kill_blob, **kwargs):
     """Two-pass, coordinate-free English removal.
     Pass 1: drop any text-show op whose normalized text is inside kill_blob (the
@@ -229,11 +250,23 @@ def remove_text_by_content(page, owner, kill_blob, **kwargs):
             affiliation markers a-d, symbols +/x/*) that are sandwiched between
             dropped body ops in stream order - pieces of a translated paragraph the
             font emitted as separate tiny ops. Running heads, page numbers and table
-            text are NOT surrounded by dropped body text, so they are preserved."""
+            text are NOT surrounded by dropped body text, so they are preserved.
+
+    Text drawn inside Form XObjects (Do operator - typical for InDesign-exported
+    brochures) is handled by recursing into every Form XObject reachable from the
+    page and applying the same removal to its stream."""
+    seen = set()
+    _strip_stream(page, page, owner, kill_blob, kwargs, seen)
+
+
+def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0,
+                  parent_decoders=None):
     blob_drop = kwargs.get("kill_blob_drop")
     blob_nodigit = _DIGIT_RE.sub("", kill_blob)
-    decoders = _page_font_decoders(page)
-    ops = list(parse_content_stream(page))
+    # an XObject may inherit fonts from its parent's Resources
+    decoders = dict(parent_decoders or {})
+    decoders.update(_page_font_decoders(res_owner))
+    ops = list(parse_content_stream(stream_obj))
     is_text=[False]*len(ops); dropped=[False]*len(ops)
     op_uni=[None]*len(ops)   # decoded Unicode text per text op (for the frag pass)
     cur_font=None
@@ -290,7 +323,23 @@ def remove_text_by_content(page, owner, kill_blob, **kwargs):
         if prevd and nextd and run_len <= _MAX_FRAG_RUN:
             dropped[i]=True
     out=[op for i,op in enumerate(ops) if not dropped[i]]
-    page.Contents = owner.make_stream(unparse_content_stream(out))
+    if depth == 0:
+        stream_obj.Contents = owner.make_stream(unparse_content_stream(out))
+    else:
+        stream_obj.write(unparse_content_stream(out))
+    # recurse into Form XObjects (their text never appears in the parent stream)
+    if depth < 6:
+        try:
+            res = stream_obj.Resources
+        except Exception:
+            res = None
+        if res is not None:
+            for xo in _form_xobjects(res, seen):
+                try:
+                    _strip_stream(xo, xo, owner, kill_blob, kwargs, seen,
+                                  depth + 1, parent_decoders=decoders)
+                except Exception:
+                    continue
 
 # ---- Japanese text layout ----------------------------------------------------
 # Per-(font, size) character-width cache. reportlab's stringWidth is a plain sum
@@ -315,7 +364,7 @@ def _wrap(text, font, size, max_w):
     return lines
 
 def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
-                              src_size=0.0, uid=None, src_lines=0):
+                              src_size=0.0, uid=None, src_lines=0, color=None):
     """Flow `text` across the unit's regions (in reading order). Pick the largest
     font (capped) such that all wrapped lines fit within the total region capacity,
     then lay lines into region 1, overflow into region 2, etc. Line slots skip
@@ -398,7 +447,8 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
         take = lines[:len(slots)]
         for y, ln in zip(slots, take):
             per_page_draws[pi].append({"x": rb["x0"], "y_top": y, "size": size,
-                                       "font": font, "line": ln, "uid": uid})
+                                       "font": font, "line": ln, "uid": uid,
+                                       "color": color})
         remaining = _remaining_after(remaining, take)
         if not remaining:
             break
@@ -549,7 +599,23 @@ def generate(name, src_path):
                 if rb["x0"] < rb2["x0"] < rb["x1"] <= rb2["x1"] + 20:
                     if rb["x1"] - rb2["x0"] <= 0.45 * (rb["x1"] - rb["x0"]):
                         rb["x1"] = rb2["x0"] - 2.0
-        visible = [b for b in p["blocks"] if id(b) not in translated_blocks]
+            # same clamp against KEPT text to the right (a spec table's value
+            # column beside its label column): the label's Japanese must wrap
+            # BEFORE the values, never run across them
+            for b in p["blocks"]:
+                if id(b) in translated_blocks or not b.get("text", "").strip():
+                    continue
+                if b["bottom"] <= rb["top"] or b["top"] >= rb["avail_bottom"]:
+                    continue
+                if rb["x0"] < b["x0"] < rb["x1"]:
+                    if rb["x1"] - b["x0"] <= 0.45 * (rb["x1"] - rb["x0"]):
+                        rb["x1"] = b["x0"] - 2.0
+        # untranslated blocks still visible on the page block the flow - except
+        # no-letter decoration (bare bullet markers "•"): a dot must not cut a
+        # region's slot rows at its y
+        visible = [b for b in p["blocks"] if id(b) not in translated_blocks
+                   and not (b["type"] in TRANS
+                            and not re.search(r"[A-Za-z]", b["text"]))]
         for rb in page_regs:
             bands = rb["obstacles"]
             for rb2 in page_regs:
@@ -594,16 +660,19 @@ def generate(name, src_path):
     per_page_draws={pi:[] for pi in range(npages)}
     import statistics as _st
     for uid,(u,regs) in unit_regions.items():
-        sizes=[]; nlines=0
+        sizes=[]; nlines=0; colors=[]
         for s in u["spans"]:
             spi,sbi=map(int,s.split(":"))
             b=layout["pages"][spi]["blocks"][sbi]
             if b.get("size"): sizes.append(b["size"])
             nlines += b.get("nlines", 1)
+            colors.append(tuple(b.get("color") or (0, 0, 0)))
         src_size=_st.median(sizes) if sizes else 0.0
+        from collections import Counter as _Ct
+        color=list(_Ct(colors).most_common(1)[0][0]) if colors else None
         _flow_unit_across_regions(u["target"], u["type"], regs, layout,
                                   per_page_draws, src_size=src_size, uid=uid,
-                                  src_lines=nlines)
+                                  src_lines=nlines, color=color)
 
     # Persist the actually-drawn line boxes so M4 can verify text/figure overlap
     # on real placement data instead of the pre-layout block bboxes.
@@ -628,7 +697,8 @@ def generate(name, src_path):
         # Subtracting xo shoved every line left by the mediabox origin (e.g. 42pt)
         # on PDFs whose mediabox is not at x=0 -> the body looked "左寄り".
         for d in per_page_draws[pi]:
-            c.setFillColor(Color(0,0,0)); c.setFont(d["font"], d["size"])
+            c.setFillColor(Color(*(d.get("color") or (0, 0, 0))))
+            c.setFont(d["font"], d["size"])
             c.drawString(d["x"], ph - d["y_top"] - d["size"], d["line"])
         c.showPage()
     c.save()

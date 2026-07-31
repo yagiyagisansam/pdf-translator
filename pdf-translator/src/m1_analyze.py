@@ -211,6 +211,36 @@ def find_gutter(chars, page_w, x0=0):
             i += 1
     return best[0] if best else None
 
+def _char_rgb(c):
+    """Char fill color as an (r,g,b) triple in 0..1. The overlay must draw the
+    Japanese in the SOURCE text's color - a brochure's white-on-photo label
+    drawn in default black is invisible on the dark background."""
+    col = c.get("non_stroking_color")
+    if col is None:
+        return (0.0, 0.0, 0.0)
+    if isinstance(col, (int, float)):
+        col = (col,)
+    try:
+        vals = [float(v) for v in col]
+    except (TypeError, ValueError):
+        return (0.0, 0.0, 0.0)
+    if len(vals) == 1:
+        g = vals[0]
+        # A single component is a GRAY level in Gray/ICC colorspaces. In a
+        # Separation/DeviceN (spot color) space it is an ink TINT: 1.0 = full
+        # ink (e.g. a solid red heading), which read as gray would be WHITE -
+        # invisible on paper. Approximate spot ink as darkness (hue unknown).
+        if str(c.get("ncs", "")) in ("Separation", "DeviceN"):
+            g = 1.0 - g
+        return (g, g, g)
+    if len(vals) == 3:
+        return tuple(min(1.0, max(0.0, v)) for v in vals)
+    if len(vals) == 4:
+        cy, ma, ye, k = vals
+        return ((1 - cy) * (1 - k), (1 - ma) * (1 - k), (1 - ye) * (1 - k))
+    return (0.0, 0.0, 0.0)
+
+
 def _mkline(seg, mw):
     seg.sort(key=lambda c: c["x0"])
     # Word-gap threshold scaled by THIS segment's median char width, not the
@@ -228,12 +258,16 @@ def _mkline(seg, mw):
     sizes = [c.get("size", 0) for c in seg if c.get("size")]
     fonts = [c.get("fontname", "") for c in seg]
     bold = sum(1 for f in fonts if "bold" in f.lower()) / max(1, len(fonts))
+    from collections import Counter
+    color = Counter(tuple(round(v, 2) for v in _char_rgb(c))
+                    for c in seg).most_common(1)[0][0]
     return {
         "x0": min(c["x0"] for c in seg), "x1": max(c["x1"] for c in seg),
         "top": min(c["top"] for c in seg), "bottom": max(c["bottom"] for c in seg),
         "text": text.strip(),
         "size": round(statistics.median(sizes), 1) if sizes else 0,
         "bold": bold > 0.5,
+        "color": list(color),
     }
 
 def detect_columns(lines, page_w):
@@ -419,8 +453,11 @@ _DIGIT_ANY_RE = re.compile(r"\d")
 
 def _mkblock(lines, col):
     lines = sorted(lines, key=lambda l: (l["top"], l["x0"]))
+    from collections import Counter
+    color = Counter(tuple(l.get("color", [0, 0, 0])) for l in lines).most_common(1)[0][0]
     return {
         "col": col,
+        "color": list(color),
         "x0": min(l["x0"] for l in lines), "x1": max(l["x1"] for l in lines),
         "top": min(l["top"] for l in lines), "bottom": max(l["bottom"] for l in lines),
         "text": " ".join(l["text"] for l in lines).strip(),
