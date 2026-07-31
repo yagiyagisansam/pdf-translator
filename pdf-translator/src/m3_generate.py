@@ -221,6 +221,21 @@ def _decode_op(op, cur_font, decoders):
     return "".join(out)
 
 
+def keep_tokens_for(p, pi, unit_for_block):
+    """Normalized tokens of everything that STAYS on page pi (kept-type blocks
+    and untranslated text) - the fragment sweep must never delete these."""
+    trans = {"body", "heading", "caption", "title"}
+    toks = set()
+    for bi, b in enumerate(p["blocks"]):
+        if b["type"] in trans and f"{pi}:{bi}" in unit_for_block:
+            continue
+        for t in b.get("text", "").split():
+            n = _norm_txt(t)
+            if n:
+                toks.add(n)
+    return toks
+
+
 def _form_xobjects(res, seen):
     """Form XObjects reachable from a Resources dict (one level's worth)."""
     out = []
@@ -297,9 +312,16 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         norm=_norm_txt(raw)
         return len(norm)<=3 or bool(_FRAG_RE.match(raw_sep))
 
+    keep_tokens = kwargs.get("keep_tokens") or frozenset()
     for i in text_idx:
         if dropped[i]: continue
         if not _is_frag(i): continue
+        # never sweep a fragment that is a KEPT block's own token (a TOC page
+        # number, a table cell): stream order can sandwich kept numbers between
+        # dropped text ops, but they must survive on the page
+        raw_i=(op_uni[i] if op_uni[i] is not None else _op_text(ops[i])).strip()
+        if raw_i and _norm_txt(raw_i) in keep_tokens:
+            continue
         k=pos[i]
         # Scan left/right SKIPPING over consecutive fragment ops to the nearest
         # NON-fragment text op. Drop this fragment only if the body text bounding
@@ -646,7 +668,9 @@ def generate(name, src_path):
     for pi,page in enumerate(pdf.pages):
         if kill_blob.get(pi):
             remove_text_by_content(page, pdf, kill_blob[pi],
-                                   kill_blob_drop=kill_blob_drop[pi])
+                                   kill_blob_drop=kill_blob_drop[pi],
+                                   keep_tokens=keep_tokens_for(
+                                       layout["pages"][pi], pi, unit_for_block))
     stripped=f"{OUT}/{name}_stripped.pdf"; pdf.save(stripped); pdf.close()
 
     # 2) overlay - flow each unit across its regions

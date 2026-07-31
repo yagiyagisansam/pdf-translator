@@ -46,10 +46,41 @@ def validate_pdf(pdf_path):
                 "encrypted PDF could not be opened "
                 "(暗号化されたPDFを開けませんでした)")
     import pdfplumber
+    max_pages = int(os.environ.get("PDF_TRANSLATOR_MAX_PAGES", "300"))
     with pdfplumber.open(pdf_path) as pdf:
         if len(pdf.pages) == 0:
             raise UnsupportedPdfError("PDF has no pages")
+        if len(pdf.pages) > max_pages:
+            # resource-exhaustion guard: a huge (or maliciously page-bombed)
+            # document must not pin the worker for hours
+            raise UnsupportedPdfError(
+                f"PDF has {len(pdf.pages)} pages (limit {max_pages}) "
+                f"(ページ数が上限{max_pages}を超えています。分割してお試しください)")
         nchars = sum(len(p.chars) for p in pdf.pages[:5])
+        # Scanned pages WITH an OCR text layer: the visible English is pixels
+        # inside a full-page image, which content-stream editing cannot remove -
+        # overlaying Japanese would print onto the untouched English image.
+        # Detect (full-page image + all text inside it) and refuse honestly.
+        scan_pages = 0
+        checked = pdf.pages[:20]
+        for p in checked:
+            pa = (p.width or 1) * (p.height or 1)
+            big = [im for im in p.images
+                   if (im["x1"] - im["x0"]) * (im["bottom"] - im["top"]) >= 0.85 * pa]
+            if big and len(p.chars) >= 20:
+                im = big[0]
+                inside = sum(1 for c in p.chars
+                             if c["x0"] >= im["x0"] - 2 and c["x1"] <= im["x1"] + 2
+                             and c["top"] >= im["top"] - 2
+                             and c["bottom"] <= im["bottom"] + 2)
+                if inside >= 0.8 * len(p.chars):
+                    scan_pages += 1
+        if scan_pages >= max(2, 0.5 * len(checked)):
+            raise UnsupportedPdfError(
+                "scanned pages with an OCR text layer - the printed English is "
+                "part of the page image and cannot be replaced "
+                "(スキャン画像の上にOCRテキスト層が乗ったPDFは、画像内の英語を消せない"
+                "ため未対応です。元データのPDFでお試しください)")
     if nchars < 50:
         raise UnsupportedPdfError(
             "no extractable text layer - scanned/image-only PDFs need OCR first "

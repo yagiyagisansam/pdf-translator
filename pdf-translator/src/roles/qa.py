@@ -145,6 +145,9 @@ def review(name, editor_report):
         types = [b["type"] for b in p["blocks"]]
         if types and sum(t == "reference" for t in types) >= max(3, len(types) * 0.4):
             ref_pages.add(p["page"])
+    # pages the editor intentionally left in English (translation coverage too
+    # low to reflow) are by-design English - not residual-strip defects
+    ref_pages |= set(editor_report.get("skip_pages") or [])
     blob = _allowed_latin_blob(units, layout)
     residual = []
     for i, txt in enumerate(_pdf_pages(out_path), start=1):

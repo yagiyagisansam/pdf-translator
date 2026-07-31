@@ -20,7 +20,13 @@ COPY pdf-translator/ ./
 ENV HOST=0.0.0.0 \
     PORT=7860 \
     PYTHONUNBUFFERED=1 \
-    PDF_TRANSLATOR_JOBS=/tmp/webjobs
+    PDF_TRANSLATOR_JOBS=/tmp/webjobs \
+    PDF_TRANSLATOR_OUT=/tmp/analysis
+
+# Run as an unprivileged user: a compromise via a malicious PDF must not get
+# root in the container. All writable paths live under /tmp.
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
 
 EXPOSE 7860
 

@@ -361,7 +361,7 @@ def _typical_line_gap(lines):
     return statistics.median(gaps) if gaps else 4.0
 
 
-def group_blocks(lines, mid, left, right, body_size):
+def group_blocks(lines, mid, left, right, body_size, rules=()):
     """Build blocks in 2D: a line joins an open block only when it is vertically
     adjacent AND horizontally aligned with it (x-overlap or shared left edge) AND
     of a similar font size. Column membership is assigned to the finished block's
@@ -373,6 +373,41 @@ def group_blocks(lines, mid, left, right, body_size):
     med_gap = _typical_line_gap(lines)
     page_text_w = max(right - left, 1.0)
     ls = sorted(lines, key=lambda l: (l["top"], l["x0"]))
+
+    def _row_rule_spans(l, m):
+        """True when a horizontal rule spans BOTH l and its row-mate m near
+        their row - the signature of a ruled table row."""
+        lo = min(l["x0"], m["x0"]); hi = max(l["x1"], m["x1"])
+        for r in rules:
+            if r["x0"] <= lo + 4 and r["x1"] >= hi - 4:
+                yr = (r["top"] + r["bottom"]) / 2
+                if l["top"] - 14 <= yr <= l["bottom"] + 14:
+                    return True
+        return False
+
+    def _is_record_row(l):
+        """A line with a NEARBY row-mate that is NUMERIC (a TOC row next to its
+        page number, a spec label next to its value) or that shares a RULED
+        table row is one row of a table/leadered list. Such rows must stay
+        one-block-per-row: merging them into a paragraph turns the table into
+        run-on prose and breaks the row alignment. (Prose lines occasionally
+        sealed this way are harmless: M2's continuation rules re-merge them
+        into one translation unit.)"""
+        lh = (l["bottom"] - l["top"]) or 1.0
+        for m in ls:
+            if m is l:
+                continue
+            ov = min(l["bottom"], m["bottom"]) - max(l["top"], m["top"])
+            if ov < 0.5 * min(lh, (m["bottom"] - m["top"]) or 1.0):
+                continue
+            gap = max(m["x0"] - l["x1"], l["x0"] - m["x1"], 0.0)
+            if gap > 0.15 * page_text_w:
+                continue
+            if _numericish(m["text"]) or _row_rule_spans(l, m):
+                return True
+        return False
+
+    record_rows = {id(l) for l in ls if _is_record_row(l)}
     open_blocks, done = [], []
     for l in ls:
         lh = (l["bottom"] - l["top"]) or 1.0
@@ -381,9 +416,10 @@ def group_blocks(lines, mid, left, right, body_size):
         for b in open_blocks:
             (done if b["bottom"] < l["top"] - allowed - 0.1 else still).append(b)
         open_blocks = still
-        starts_new = bool(HEAD_RE.match(l["text"])) or bool(CAP_RE.match(l["text"]))
+        starts_new = (bool(HEAD_RE.match(l["text"])) or bool(CAP_RE.match(l["text"]))
+                      or id(l) in record_rows)
         best = best_score = None
-        if not starts_new:
+        if not starts_new and id(l) not in record_rows:
             for b in open_blocks:
                 gap = l["top"] - b["bottom"]
                 if gap > allowed or gap < -lh * 0.6:
@@ -413,10 +449,12 @@ def group_blocks(lines, mid, left, right, body_size):
                 if best is None or score > best_score:
                     best, best_score = b, score
         if best is None:
-            open_blocks.append({
-                "lines": [l], "x0": l["x0"], "x1": l["x1"],
-                "top": l["top"], "bottom": l["bottom"],
-                "size_med": l["size"]})
+            blk = {"lines": [l], "x0": l["x0"], "x1": l["x1"],
+                   "top": l["top"], "bottom": l["bottom"],
+                   "size_med": l["size"], "record": id(l) in record_rows}
+            # a record row (TOC/table row) is sealed: one line = one block,
+            # nothing may attach to it
+            (done if id(l) in record_rows else open_blocks).append(blk)
         else:
             b = best
             b["lines"].append(l)
@@ -428,6 +466,8 @@ def group_blocks(lines, mid, left, right, body_size):
     for b in done + open_blocks:
         blk = _mkblock(b["lines"], 0)
         blk["col"] = assign_column(blk, mid, left, right)
+        if b.get("record"):
+            blk["record"] = True
         blocks.append(blk)
     return blocks
 
@@ -559,7 +599,9 @@ def analyze_pdf(path, name, render=True):
         left = min([l["x0"] for l in lines], default=0)
         right = max([l["x1"] for l in lines], default=pw)
         mid = gutter if gutter is not None else detect_columns(lines, pw)
-        blocks = group_blocks(lines, mid, left, right, body_size)
+        page_rules = horizontal_rules(page)
+        blocks = group_blocks(lines, mid, left, right, body_size,
+                              rules=page_rules)
         # reference zone: page where many ref-pattern lines
         is_ref = sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3
         for b in blocks:
@@ -604,7 +646,18 @@ def analyze_pdf(path, name, render=True):
                          "x0": im["x0"], "x1": im["x1"],
                          "top": im["top"], "bottom": im["bottom"],
                          "text": "", "order": None})
-        rules = horizontal_rules(page)
+        rules = page_rules
+        # drop TEXT UNDERLINES (link underlines, struck text): a rule lying
+        # inside a text block's bbox belongs to the text, not the page
+        # structure - as an obstacle it would shred the reflow capacity of a
+        # link-dense page (every hyperlink underline cutting the column)
+        rules = [r for r in rules
+                 if not any(b["type"] in ("body", "heading", "caption", "title",
+                                          "reference")
+                            and b["x0"] - 2 <= r["x0"] and r["x1"] <= b["x1"] + 2
+                            and b["top"] - 2 <= r["top"]
+                            and r["bottom"] <= b["bottom"] + 3
+                            for b in blocks)]
         ordered = reading_order(blocks)
         doc["pages"].append({
             "page": pi + 1, "width": pw, "height": ph,
@@ -615,18 +668,25 @@ def analyze_pdf(path, name, render=True):
         })
     pdf.close()
 
-    # mark repeated headers (same normalized text in top region on >=3 pages)
+    # mark repeated headers/footers (same normalized text in the top OR bottom
+    # margin zone on >=3 pages): running furniture, kept verbatim - a footer
+    # like "Research Briefing, 27 Nov" typed as body would anchor below the
+    # flow band and permanently overflow
     from collections import Counter
     def norm(t): return re.sub(r"[\d\s]", "", t).lower()[:40]
+
+    def in_margin(b, p):
+        return (b["top"] < p["height"] * 0.15
+                or b["bottom"] > p["height"] * 0.88)
     topcnt = Counter()
     for p in doc["pages"]:
         for b in p["blocks"]:
-            if b["top"] < p["height"] * 0.15 and len(b["text"]) > 6:
+            if in_margin(b, p) and len(b["text"]) > 6:
                 topcnt[norm(b["text"])] += 1
     repeated = {k for k, v in topcnt.items() if v >= 3}
     for p in doc["pages"]:
         for b in p["blocks"]:
-            if b["top"] < p["height"] * 0.15 and norm(b["text"]) in repeated:
+            if in_margin(b, p) and norm(b["text"]) in repeated:
                 b["type"] = "running_head"
 
     # body-flow candidates: real body text, away from margins

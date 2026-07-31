@@ -22,6 +22,7 @@ Engines: 'google' (free, keyless) default; 'gemini' (free tier, needs a Google
 AI Studio key); 'anthropic'/'openai' paid; 'mock' offline demo.
 """
 import base64
+import collections
 import json as _json
 import os, re, secrets, shutil, subprocess, sys, threading, time, uuid
 
@@ -44,6 +45,38 @@ AUTH_TOKEN = os.environ.get("PDF_TRANSLATOR_TOKEN")
 KEEPALIVE_SEC = int(os.environ.get("PDF_TRANSLATOR_KEEPALIVE_SEC", "300"))
 SELF_URL = (os.environ.get("RENDER_EXTERNAL_URL")
             or os.environ.get("PDF_TRANSLATOR_PUBLIC_URL") or "").rstrip("/")
+# Hard wall-clock limit per translation job: a pathological/malicious PDF must
+# not hold a worker slot forever (resource-exhaustion guard).
+JOB_TIMEOUT_SEC = int(float(os.environ.get("PDF_TRANSLATOR_JOB_TIMEOUT_MIN",
+                                           "45")) * 60)
+# Per-client rate limit on expensive endpoints (jobs/hour). The whole site is
+# already behind the password; this is defense in depth against a leaked
+# credential being used to grind the server.
+RATE_LIMIT_PER_HOUR = int(os.environ.get("PDF_TRANSLATOR_RATE_LIMIT", "30"))
+_RATE = collections.defaultdict(collections.deque)   # ip -> deque[timestamps]
+_RATE_LOCK = threading.Lock()
+JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _client_ip(request):
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _rate_limited(request):
+    """True if this client exceeded RATE_LIMIT_PER_HOUR on guarded endpoints."""
+    now = time.time()
+    ip = _client_ip(request)
+    with _RATE_LOCK:
+        q = _RATE[ip]
+        while q and q[0] < now - 3600:
+            q.popleft()
+        if len(q) >= RATE_LIMIT_PER_HOUR:
+            return True
+        q.append(now)
+    return False
 
 app = FastAPI(title="PDF EN→JA Translator")
 JOBS = {}  # job_id -> {status, stage, error, result, filename, created}
@@ -134,6 +167,10 @@ async def _auth_middleware(request, call_next):
     # so the browser shows a login prompt and only you can open the app.
     if not _auth_ok(request):
         from starlette.responses import Response
+        # small fixed delay throttles credential brute-forcing without hurting
+        # a human retyping a password (async - never blocks the event loop)
+        import asyncio
+        await asyncio.sleep(0.25)
         return Response("認証が必要です（パスワードを入力してください）", status_code=401,
                         headers={"WWW-Authenticate": 'Basic realm="pdf-translator"',
                                  "X-Robots-Tag": "noindex, nofollow"})
@@ -141,7 +178,26 @@ async def _auth_middleware(request, call_next):
     # Invite-only app: never appear in search results, even while it is
     # temporarily running without a password.
     response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    for k, v in SECURITY_HEADERS.items():
+        response.headers.setdefault(k, v)
     return response
+
+
+# Applied to every authenticated response. The single-page UI uses inline
+# script/style, so those must be allowed - everything else is locked down:
+# no external loads, no framing, no referrer leakage, no powerful APIs.
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'unsafe-inline'; "
+        "style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; "
+        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+}
 
 
 @app.get("/robots.txt")
@@ -192,23 +248,38 @@ def _run_job(job_id):
     tail = []
     xlated = None            # (done, total) parsed from "translated X/Y units"
     quota_hit = False        # Gemini daily free-tier quota was exhausted mid-job
+    killed = {"v": False}
     with _slots:
         job["status"] = "running"
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, env=env,
                                 cwd=os.path.join(ROOT, "src"))
-        for line in proc.stdout:
-            line = line.rstrip()
-            tail = (tail + [line])[-8:]
-            mt = re.search(r"translated\s+(\d+)/(\d+)\s+units", line)
-            if mt:
-                xlated = (int(mt.group(1)), int(mt.group(2)))
-            if "quota exhausted" in line or "RESOURCE_EXHAUSTED" in line:
-                quota_hit = True
-            label = _stage_label(line)
-            if label:
-                job["stage"] = label
-        proc.wait()
+
+        def _kill():
+            killed["v"] = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        # hard wall-clock limit: a pathological PDF must not pin a worker forever
+        watchdog = threading.Timer(JOB_TIMEOUT_SEC, _kill)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            for line in proc.stdout:
+                line = line.rstrip()
+                tail = (tail + [line])[-8:]
+                mt = re.search(r"translated\s+(\d+)/(\d+)\s+units", line)
+                if mt:
+                    xlated = (int(mt.group(1)), int(mt.group(2)))
+                if "quota exhausted" in line or "RESOURCE_EXHAUSTED" in line:
+                    quota_hit = True
+                label = _stage_label(line)
+                if label:
+                    job["stage"] = label
+            proc.wait()
+        finally:
+            watchdog.cancel()
     result = os.path.join(out_dir, "doc_ja.pdf")
     if job.get("_deleted"):
         return   # user deleted this job mid-run; don't re-create its files/metadata
@@ -241,9 +312,13 @@ def _run_job(job_id):
                 return
     else:
         job["status"] = "error"
-        # surface the pipeline's own message (e.g. encrypted / scanned PDF)
-        err = next((l for l in reversed(tail) if l.startswith("error:")), None)
-        job["error"] = (err or "\n".join(tail))[:500]
+        if killed["v"]:
+            job["error"] = (f"処理時間の上限({JOB_TIMEOUT_SEC // 60}分)を超えたため"
+                            f"中断しました。ページ数の少ないPDFでお試しください。")
+        else:
+            # surface the pipeline's own message (e.g. encrypted / scanned PDF)
+            err = next((l for l in reversed(tail) if l.startswith("error:")), None)
+            job["error"] = (err or "\n".join(tail))[:500]
     _persist(job_id)
 
 
@@ -323,6 +398,8 @@ def gemini_test(request: Request, api_key: str = Form(""), model: str = Form("")
     sees WHY translation produced no Japanese - and, crucially, WHICH model
     actually works for their key (free-tier availability varies). Behind the
     site password; the key is used only for the probe, never stored."""
+    if _rate_limited(request):
+        return {"ok": False, "error": "リクエストが多すぎます。時間を空けてお試しください。"}
     key = (api_key or os.environ.get("GEMINI_API_KEY")
            or os.environ.get("GOOGLE_API_KEY") or "").strip()
     if not key:
@@ -350,6 +427,8 @@ async def create_job(request: Request, file: UploadFile = File(...),
                      engine: str = Form("google"), api_key: str = Form(""),
                      model: str = Form("")):
     _sweep()
+    if _rate_limited(request):
+        raise HTTPException(429, "リクエストが多すぎます。1時間ほど空けてお試しください。")
     if engine not in ("mock", "google", "gemini", "anthropic", "openai"):
         raise HTTPException(400, "unknown engine")
     if engine in ENGINE_KEYS and not os.environ.get(ENGINE_KEYS[engine]):
@@ -439,6 +518,8 @@ def list_jobs(request: Request):
 
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str, request: Request):
+    if not JOB_ID_RE.match(job_id):
+        raise HTTPException(404, "no such job")
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
@@ -448,6 +529,8 @@ def job_status(job_id: str, request: Request):
 
 @app.get("/api/jobs/{job_id}/download")
 def job_download(job_id: str, request: Request):
+    if not JOB_ID_RE.match(job_id):
+        raise HTTPException(404, "no such job")
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
@@ -482,6 +565,8 @@ def job_download(job_id: str, request: Request):
 def job_delete(job_id: str, request: Request):
     """Delete a translated PDF: remove its local files, its Supabase copy (if any),
     and drop it from the history. Behind the site password like everything else."""
+    if not JOB_ID_RE.match(job_id):
+        raise HTTPException(404, "no such job")
     job = JOBS.get(job_id)
     if job is None:
         raise HTTPException(404, "no such job")
