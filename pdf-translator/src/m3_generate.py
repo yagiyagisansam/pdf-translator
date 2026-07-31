@@ -509,6 +509,7 @@ def generate(name, src_path):
         # Extend the usable width rightward to the right edge of body text in the
         # same column so the heading renders on one line instead of wrapping & clipping.
         if btype in ("heading", "title"):
+            src_x1 = x1
             col_right = x1
             for ob in blocks_all:
                 if ob["type"] in ("body", "heading", "caption") and \
@@ -516,6 +517,11 @@ def generate(name, src_path):
                     if ob["x0"] < x0 + 40:
                         col_right = max(col_right, ob["x1"])
             x1 = max(x1, col_right)
+            # never widen INTO a photo the source heading did not touch
+            for f in figs:
+                if src_x1 <= f["x0"] < x1 and \
+                        not (f["bottom"] <= top or f["top"] >= bottom):
+                    x1 = max(src_x1, f["x0"] - 2.0)
         FIG_MARGIN = 8.0
         CAP_CLEAR = 26.0
         # push start below an overlapping figure (captions need more clearance:
