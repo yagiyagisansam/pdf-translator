@@ -104,6 +104,41 @@ GitHub Actions を使います。
 
 一度入れればスマホが記憶します。空にすればURLを知っている人は誰でも使えます。
 
+## quick-calc.site のサブドメインで公開する(pdf.quick-calc.site)
+
+Render の無料プランはカスタムドメインに対応しているので、`onrender.com` のURLの
+代わりに **`pdf.quick-calc.site`** でこのアプリを開けるようにできます。
+計算ツール・統計ツールとは独立した非公開ツールとして運用する前提のため、
+サイト側(calc-toolbox)からはリンクを張らず、アプリ側は常に
+noindex(`X-Robots-Tag`)+`robots.txt` 全拒否で検索エンジンに載りません。
+すべてスマホのブラウザだけで設定できます。
+
+1. Render のサービス → **Settings** → **Custom Domains** → **Add Custom Domain**。
+2. ドメイン名に次を入力して追加:
+   ```
+   pdf.quick-calc.site
+   ```
+3. Render が「この CNAME レコードを追加してください」と表示します。値は
+   自分のサービスのホスト名(例)です:
+   ```
+   pdf-en-ja-translator-xxxx.onrender.com
+   ```
+4. quick-calc.site を管理しているDNS設定画面(ドメインを購入したサービスの
+   管理画面。GitHub Pages 用のDNSを設定したのと同じ場所)を開き、
+   レコードを1件追加:
+   - **種別**: CNAME
+   - **ホスト名(名前)**: `pdf`
+   - **値(向き先)**: 手順3で表示されたホスト名
+5. Render の Custom Domains 画面に戻り **Verify**。反映まで数分〜1時間ほど。
+   証明書(https)は Render が自動発行します。
+6. `https://pdf.quick-calc.site` を開き、ログイン画面(パスワード保護を
+   設定済みの場合)→ アプリが表示されれば完了。元の `onrender.com` のURLも
+   そのまま使えます。
+
+> 利用者を限定する運用では、上の「自分だけアクセス可にする(パスワード保護)」で
+> `PDF_TRANSLATOR_TOKEN` を必ず設定し、URLとパスワードを使ってよい人にだけ
+> 伝えてください。
+
 ## 再デプロイでも消さない(Supabase ストレージ連携・スマホのみ)
 
 Render 無料プランはディスクが非永続で、**再デプロイのたびに保存物が消えます**。

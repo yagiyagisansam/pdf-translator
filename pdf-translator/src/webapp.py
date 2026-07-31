@@ -123,16 +123,30 @@ def _auth_ok(request):
 @app.middleware("http")
 async def _auth_middleware(request, call_next):
     # /healthz is the always-open keep-alive/health endpoint (no login), so an
-    # uptime pinger can hit it to stop the free host from idling.
-    if request.url.path == "/healthz":
-        return await call_next(request)
+    # uptime pinger can hit it to stop the free host from idling. /robots.txt
+    # must also stay open: crawlers can't log in, and a 4xx robots.txt is
+    # treated by Google as "no restrictions".
+    if request.url.path in ("/healthz", "/robots.txt"):
+        response = await call_next(request)
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        return response
     # Whole-site gate: when a password is set, the page AND the API require it,
     # so the browser shows a login prompt and only you can open the app.
     if not _auth_ok(request):
         from starlette.responses import Response
         return Response("認証が必要です（パスワードを入力してください）", status_code=401,
-                        headers={"WWW-Authenticate": 'Basic realm="pdf-translator"'})
-    return await call_next(request)
+                        headers={"WWW-Authenticate": 'Basic realm="pdf-translator"',
+                                 "X-Robots-Tag": "noindex, nofollow"})
+    response = await call_next(request)
+    # Invite-only app: never appear in search results, even while it is
+    # temporarily running without a password.
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return response
+
+
+@app.get("/robots.txt")
+def robots_txt():
+    return Response("User-agent: *\nDisallow: /\n", media_type="text/plain")
 
 # The orchestrator prints "  [<role>] <detail>" per step.
 ROLE_LABELS = {
