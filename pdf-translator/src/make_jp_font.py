@@ -84,9 +84,12 @@ def cff_to_glyf(font):
     return font
 
 def _load_font(src_path, subfont_index):
+    # lazy=True: load glyphs on demand. Eager loading parses the ENTIRE
+    # 100MB+ Noto CJK collection (~300MB RSS) just to subset a few hundred
+    # glyphs - the single biggest memory spike of a translation job.
     if src_path.lower().endswith(".ttc"):
-        return TTCollection(src_path).fonts[subfont_index]
-    return TTFont(src_path)
+        return TTCollection(src_path, lazy=True).fonts[subfont_index]
+    return TTFont(src_path, lazy=True)
 
 def build(src_path, out_path, subfont_index, chars):
     font=_load_font(src_path, subfont_index)
