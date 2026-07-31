@@ -28,57 +28,133 @@ def load_label_font(sz):
             return ImageFont.truetype(p, sz)
     return ImageFont.load_default()
 
-def _cluster_rows(chars):
-    """Group y-sorted chars into visual rows. A char joins the current row when its
-    vertical CENTER is within 0.6x the (smaller) char height of the row's median
-    center. The reference is the row's MEDIAN center - stable within a line - not
-    an accumulated bounding box, so tight line spacing can't chain successive
-    lines into one giant row (which would interleave their characters by x when
-    sorted). Different-size adjacent lines still separate (their centers differ by
-    more than the tolerance), and raised superscripts still join their base line
-    (their center stays within tolerance)."""
-    import statistics as _st
-    rows = []
-    cur = [chars[0]]
-    cy = (chars[0]["top"] + chars[0]["bottom"]) / 2
-    ch_med = chars[0]["bottom"] - chars[0]["top"]
-    for c in chars[1:]:
-        c_cy = (c["top"] + c["bottom"]) / 2
-        h = min(ch_med, c["bottom"] - c["top"]) or ch_med
-        if abs(c_cy - cy) <= 0.6 * h:
-            cur.append(c)
-            cy = _st.median((x["top"] + x["bottom"]) / 2 for x in cur)
-            ch_med = _st.median(x["bottom"] - x["top"] for x in cur)
-        else:
-            rows.append(cur)
-            cur = [c]; cy = c_cy; ch_med = c["bottom"] - c["top"]
-    rows.append(cur)
-    return rows
-
-def cluster_lines(chars, gutter=None):
-    """Cluster chars into rows by y, then split rows into line-segments by big x-gaps (columns).
-    If a gutter x is given, force a split there so two-column rows separate cleanly."""
+def _char_segments(chars, gutter=None):
+    """Cluster chars into LINE SEGMENTS in 2D: a char joins an open segment only
+    when its vertical span overlaps the segment's span by >=55% of the smaller
+    height AND it is horizontally near the segment (gap bounded by the segment's
+    own char width). This is island-safe: text sitting at the same y but far away
+    on the page (a diagram callout label next to a sidebar paragraph, the two
+    halves of a spread) can never join - the old row-then-split approach chained
+    such islands through a shared row and interleaved their characters by x.
+    If a gutter x is given, segments never grow across it (two-column rows
+    separate cleanly). Returns a list of char lists."""
     chars = [c for c in chars if c.get("text", "").strip() != ""]
     if not chars:
         return []
     widths = [c["x1"] - c["x0"] for c in chars]
     mw = statistics.median(widths) or 4.0
-    chars.sort(key=lambda c: (round(c["top"], 1), c["x0"]))
-    rows = _cluster_rows(chars)
+    chars = sorted(chars, key=lambda c: (c["top"], c["x0"]))
+    open_segs, done = [], []
+    for c in chars:
+        ch_h = (c["bottom"] - c["top"]) or 1.0
+        # chars arrive in top order, so a segment ending above this char can
+        # never receive another member - close it
+        still = []
+        for s in open_segs:
+            (done if s["bottom"] <= c["top"] + 0.1 else still).append(s)
+        open_segs = still
+        best = best_score = None
+        for s in open_segs:
+            ov = min(s["bottom"], c["bottom"]) - max(s["top"], c["top"])
+            if ov < 0.55 * min(ch_h, s["h"]):
+                continue
+            gap = max(c["x0"] - s["x1"], s["x0"] - c["x1"], 0.0)
+            # word spaces are ~0.5x char width; column/label gaps are far larger.
+            # The cap keeps a stretched (justified) space inside the line while a
+            # table's label->value gap or a callout island still splits.
+            lim = min(max(3.2 * s["cw"], 1.6 * s["h"]), 30.0)
+            if gap > lim:
+                continue
+            # split at the column gutter, but only when the gap there is clearly
+            # wider than a word space - a full-width title/abstract line crosses
+            # the gutter with normal spacing and must stay whole
+            if gutter is not None and gap > 2.0 * s["cw"] and (
+                    (s["x1"] <= gutter <= c["x0"]) or (c["x1"] <= gutter <= s["x0"])):
+                continue
+            score = (ov / min(ch_h, s["h"]), -gap)
+            if best is None or score > best_score:
+                best, best_score = s, score
+        if best is None:
+            open_segs.append({
+                "chars": [c], "x0": c["x0"], "x1": c["x1"],
+                "top": c["top"], "bottom": c["bottom"],
+                "h": ch_h, "cw": (c["x1"] - c["x0"]) or mw})
+        else:
+            s = best
+            s["chars"].append(c)
+            s["x0"] = min(s["x0"], c["x0"]); s["x1"] = max(s["x1"], c["x1"])
+            s["top"] = min(s["top"], c["top"]); s["bottom"] = max(s["bottom"], c["bottom"])
+            # running medians keep the attach thresholds stable within the line
+            s["h"] = statistics.median(x["bottom"] - x["top"] for x in s["chars"]) or 1.0
+            s["cw"] = statistics.median(x["x1"] - x["x0"] for x in s["chars"]) or mw
+            # A raised superscript (or a symbol like ±) can open its own segment
+            # BEFORE its line's lower chars arrive (chars stream in top order);
+            # the line then grows toward it from the side. Merge open segments
+            # that have become adjacent so the line ends up whole.
+            merged = True
+            while merged:
+                merged = False
+                for o in open_segs:
+                    if o is s:
+                        continue
+                    ov = min(s["bottom"], o["bottom"]) - max(s["top"], o["top"])
+                    if ov < 0.55 * min(s["h"], o["h"]):
+                        continue
+                    gap = max(o["x0"] - s["x1"], s["x0"] - o["x1"], 0.0)
+                    if gap > min(max(3.2 * max(s["cw"], o["cw"]),
+                                     1.6 * max(s["h"], o["h"])), 30.0):
+                        continue
+                    if gutter is not None and gap > 2.0 * max(s["cw"], o["cw"]) and (
+                            (s["x1"] <= gutter <= o["x0"]) or (o["x1"] <= gutter <= s["x0"])):
+                        continue
+                    s["chars"] += o["chars"]
+                    s["x0"] = min(s["x0"], o["x0"]); s["x1"] = max(s["x1"], o["x1"])
+                    s["top"] = min(s["top"], o["top"]); s["bottom"] = max(s["bottom"], o["bottom"])
+                    s["h"] = statistics.median(
+                        x["bottom"] - x["top"] for x in s["chars"]) or 1.0
+                    s["cw"] = statistics.median(
+                        x["x1"] - x["x0"] for x in s["chars"]) or mw
+                    open_segs.remove(o)
+                    merged = True
+                    break
+    return [s["chars"] for s in done + open_segs]
 
-    lines = []
-    gap_thresh = mw * 3.0
-    for row in rows:
-        row.sort(key=lambda c: c["x0"])
-        seg = [row[0]]
-        for c in row[1:]:
-            crosses_gutter = (gutter is not None and seg[-1]["x1"] <= gutter <= c["x0"])
-            if crosses_gutter or (c["x0"] - seg[-1]["x1"] > gap_thresh):
-                lines.append(_mkline(seg, mw)); seg = [c]
+
+def cluster_lines(chars, gutter=None):
+    """Char segments (see _char_segments) rendered as line dicts, with one
+    refinement: a segment is split at an ALIGNMENT EDGE - a gap that lands
+    exactly on a left edge shared by several other segments (the start of a
+    neighbouring text island/column). Two islands separated by only ~10pt can
+    otherwise fuse through one long line; the shared left edge is the reliable
+    signal that a new island starts there. False splits are harmless (the block
+    builder reunites x-overlapping fragments); false MERGES garble text."""
+    chars = [c for c in chars if c.get("text", "").strip() != ""]
+    if not chars:
+        return []
+    mw = statistics.median([c["x1"] - c["x0"] for c in chars]) or 4.0
+    segs = [sorted(s, key=lambda c: (c["x0"], c["top"]))
+            for s in _char_segments(chars, gutter=gutter)]
+    from collections import Counter
+    starts = Counter(round(s[0]["x0"]) for s in segs)
+    strong = [x for x, n in starts.items() if n >= 3]
+    def at_edge(x):
+        return any(abs(x - e) <= 1.5 for e in strong)
+    out = []
+    for seg in segs:
+        cw = statistics.median([c["x1"] - c["x0"] for c in seg]) or mw
+        cur = [seg[0]]
+        marker_re = re.compile(r"^[•‣⁃▪●–—·∙\-\d.()\[\]]+$")
+        for c in seg[1:]:
+            # never orphan a leading list/heading marker ("•", "3.", "[12]") -
+            # its text always starts at a shared edge (hanging indent)
+            head = "".join(x["text"] for x in cur).strip()
+            if not marker_re.match(head) and at_edge(c["x0"]) \
+                    and c["x0"] - cur[-1]["x1"] >= max(4.0, 1.2 * cw):
+                out.append(cur); cur = [c]
             else:
-                seg.append(c)
-        lines.append(_mkline(seg, mw))
-    return lines
+                cur.append(c)
+        out.append(cur)
+    return [_mkline(s, mw) for s in out]
 
 def find_gutter(chars, page_w, x0=0):
     """Find a vertical whitespace band (column gutter) by scanning an x-coverage histogram.
@@ -94,23 +170,16 @@ def find_gutter(chars, page_w, x0=0):
         return None
     mid_guess = (lo + hi) / 2
 
-    # Group chars into rows; drop rows whose span crosses the center (full-width lines)
-    chars.sort(key=lambda c: (round(c["top"], 1), c["x0"]))
-    rows = _cluster_rows(chars)
-
+    # Cluster chars into line segments; drop segments that span across the center
+    # (full-width title/abstract lines would otherwise mask the gutter). Column
+    # text stays on its own side, so what remains exposes the whitespace band.
     band = width * 0.04
     col_chars = []
-    for row in rows:
-        rl = min(c["x0"] for c in row); rr = max(c["x1"] for c in row)
-        # a full-width row spans across the center with no internal gutter -> skip it
+    for seg in _char_segments(chars):
+        rl = min(c["x0"] for c in seg); rr = max(c["x1"] for c in seg)
         if rl < mid_guess - band and rr > mid_guess + band:
-            # check if the row itself has a big internal gap (then it's 2-col, keep)
-            row_sorted = sorted(row, key=lambda c: c["x0"])
-            biggap = max((row_sorted[i+1]["x0"] - row_sorted[i]["x1"]
-                          for i in range(len(row_sorted)-1)), default=0)
-            if biggap < width * 0.03:
-                continue
-        col_chars.extend(row)
+            continue
+        col_chars.extend(seg)
     if len(col_chars) < 40:
         col_chars = chars  # fallback
 
@@ -206,6 +275,11 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
         numlike = sum(1 for tk in toks if re.fullmatch(r"[\d.,%×x±+\-/()]+", tk))
         if numlike / len(toks) > 0.5:
             return "data"
+    # a measurement cell ("22.83 m", "3 x 1,884 kW") or a stack of them (a spec
+    # table's value column) is table data: keep verbatim, never translate
+    if _numericish(t) or (b.get("nlines", 1) >= 2
+                          and b.get("num_lines", 0) / b["nlines"] >= 0.6):
+        return "data"
     # top running head / bottom footer
     if b["top"] < page_h * 0.07:
         if re.fullmatch(r"\d{1,4}", t.strip()):
@@ -227,33 +301,124 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
         return "title"
     if (b["bold"] and HEAD_RE.match(t)) or HEAD_RE.match(t) or (b["bold"] and b["size"] >= body_size * 1.05 and len(t) < 60):
         return "heading"
+    # a lone capitalized word on its own line is a section label
+    # ("Abstract", "Introduction", "References") - a merge boundary, not prose
+    if b.get("nlines", 1) == 1 and re.fullmatch(r"[A-Z][A-Za-z]{2,15}", t.strip()):
+        return "heading"
     return "body"
 
+def _typical_line_gap(lines):
+    """Median vertical gap between a line and the nearest line below it that
+    overlaps it horizontally (i.e. the page's typical leading), robust to pages
+    that mix several independent text islands."""
+    gaps = []
+    ls = sorted(lines, key=lambda l: l["top"])
+    for i, l in enumerate(ls):
+        best = None
+        for m in ls[i + 1:]:
+            g = m["top"] - l["bottom"]
+            if g > 40:
+                break
+            if g >= -1 and min(l["x1"], m["x1"]) - max(l["x0"], m["x0"]) > 0:
+                if best is None or g < best:
+                    best = g
+        if best is not None:
+            gaps.append(best)
+    return statistics.median(gaps) if gaps else 4.0
+
+
 def group_blocks(lines, mid, left, right, body_size):
-    for l in lines:
-        l["col"] = assign_column(l, mid, left, right)
+    """Build blocks in 2D: a line joins an open block only when it is vertically
+    adjacent AND horizontally aligned with it (x-overlap or shared left edge) AND
+    of a similar font size. Column membership is assigned to the finished block's
+    bbox. The old per-column purely-vertical merge chained unrelated text islands
+    (sidebar paragraphs, diagram labels, table columns) that happened to share
+    the page's single wide column."""
+    if not lines:
+        return []
+    med_gap = _typical_line_gap(lines)
+    page_text_w = max(right - left, 1.0)
+    ls = sorted(lines, key=lambda l: (l["top"], l["x0"]))
+    open_blocks, done = [], []
+    for l in ls:
+        lh = (l["bottom"] - l["top"]) or 1.0
+        allowed = max(med_gap * 1.8, lh * 0.9)
+        still = []
+        for b in open_blocks:
+            (done if b["bottom"] < l["top"] - allowed - 0.1 else still).append(b)
+        open_blocks = still
+        starts_new = bool(HEAD_RE.match(l["text"])) or bool(CAP_RE.match(l["text"]))
+        best = best_score = None
+        if not starts_new:
+            for b in open_blocks:
+                gap = l["top"] - b["bottom"]
+                if gap > allowed or gap < -lh * 0.6:
+                    continue
+                ov = min(l["x1"], b["x1"]) - max(l["x0"], b["x0"])
+                wmin = min(l["x1"] - l["x0"], b["x1"] - b["x0"]) or 1.0
+                aligned = abs(l["x0"] - b["x0"]) <= max(6.0, (l["size"] or 8.0))
+                if not (ov >= 0.45 * wmin or (aligned and ov > 0)):
+                    continue
+                # tabular row guard: if ANOTHER segment sits on the same visual
+                # row inside this block's x-span, the row is a table row (multiple
+                # cells) - it must not be absorbed into a prose/caption block
+                if any(m is not l
+                       and min(l["bottom"], m["bottom"]) - max(l["top"], m["top"])
+                           >= 0.5 * min(lh, (m["bottom"] - m["top"]) or 1.0)
+                       and min(m["x1"], b["x1"]) - max(m["x0"], b["x0"]) > 0
+                       for m in ls):
+                    continue
+                s1 = l["size"] or body_size or 10
+                s2 = b["size_med"] or body_size or 10
+                if max(s1, s2) / max(0.1, min(s1, s2)) > 1.25:
+                    continue    # different font sizes = different roles (title vs
+                                # author line, label vs body) - keep them apart
+                if l["x0"] - b["x0"] > page_text_w * 0.03:
+                    continue    # indented line = new paragraph
+                score = (ov / wmin, -gap)
+                if best is None or score > best_score:
+                    best, best_score = b, score
+        if best is None:
+            open_blocks.append({
+                "lines": [l], "x0": l["x0"], "x1": l["x1"],
+                "top": l["top"], "bottom": l["bottom"],
+                "size_med": l["size"]})
+        else:
+            b = best
+            b["lines"].append(l)
+            b["x0"] = min(b["x0"], l["x0"]); b["x1"] = max(b["x1"], l["x1"])
+            b["top"] = min(b["top"], l["top"]); b["bottom"] = max(b["bottom"], l["bottom"])
+            b["size_med"] = statistics.median(
+                [x["size"] for x in b["lines"] if x["size"]] or [0])
     blocks = []
-    for col in sorted(set(l["col"] for l in lines)):
-        cl = sorted([l for l in lines if l["col"] == col], key=lambda l: l["top"])
-        if not cl:
-            continue
-        gaps = [cl[i+1]["top"] - cl[i]["bottom"] for i in range(len(cl)-1)]
-        med_gap = statistics.median(gaps) if gaps else 4.0
-        cur = [cl[0]]
-        for i in range(1, len(cl)):
-            prev, ln = cl[i-1], cl[i]
-            gap = ln["top"] - prev["bottom"]
-            newpara = gap > max(med_gap * 1.8, (ln["bottom"]-ln["top"]) * 0.9)
-            heading = bool(HEAD_RE.match(ln["text"])) or bool(CAP_RE.match(ln["text"]))
-            indent = ln["x0"] - prev["x0"] > (right-left) * 0.03
-            if newpara or heading or indent:
-                blocks.append(_mkblock(cur, col)); cur = [ln]
-            else:
-                cur.append(ln)
-        blocks.append(_mkblock(cur, col))
+    for b in done + open_blocks:
+        blk = _mkblock(b["lines"], 0)
+        blk["col"] = assign_column(blk, mid, left, right)
+        blocks.append(blk)
     return blocks
 
+# Tokens that read as measurements/table cells alongside digits. Used to spot
+# spec-table value columns ("22.83 m", "74 ft 11 in", "3 x 1,884 kW") that must
+# stay verbatim (type "data"), on any document - not tied to one sample.
+_UNIT_TOKEN_RE = re.compile(
+    r"(?i)^(?:m|cm|mm|km|kg|g|lb|lbs|ft|in|kt|kts|kph|mph|nm|shp|hp|kw|kn|"
+    r"s|sec|min|hr|hrs|hours?|x|×|/|%|°[cf]?|ft/min|m/s\d?|kg/m\d?)$")
+
+
+def _numericish(text):
+    toks = text.split()
+    if not toks or not _DIGIT_ANY_RE.search(text):
+        return False
+    hits = sum(1 for t in toks
+               if re.fullmatch(r"[\d.,%×x±+\-/()<>≈=]+", t) or _UNIT_TOKEN_RE.match(t))
+    return hits / len(toks) > 0.5
+
+
+_DIGIT_ANY_RE = re.compile(r"\d")
+
+
 def _mkblock(lines, col):
+    lines = sorted(lines, key=lambda l: (l["top"], l["x0"]))
     return {
         "col": col,
         "x0": min(l["x0"] for l in lines), "x1": max(l["x1"] for l in lines),
@@ -262,6 +427,7 @@ def _mkblock(lines, col):
         "size": statistics.median([l["size"] for l in lines if l["size"]] or [0]),
         "bold": sum(l["bold"] for l in lines) > len(lines)/2,
         "nlines": len(lines),
+        "num_lines": sum(1 for l in lines if _numericish(l["text"])),
     }
 
 def horizontal_rules(page, min_width=30.0, max_thick=3.0):
@@ -339,7 +505,10 @@ def analyze_pdf(path, name, render=True):
     npages = len(pdf.pages)
     for pi, page in enumerate(pdf.pages):
         pw, ph = page.width, page.height
-        chars = page.chars
+        # rotated (non-upright) text is figure content - chart axis labels,
+        # decorative verticals. It extracts garbled (reversed), cannot be
+        # stripped reliably, and must simply stay untouched on the page.
+        chars = [c for c in page.chars if c.get("upright", True)]
         # First pass to estimate body size, then detect the column gutter from body-region chars
         prelim = cluster_lines(chars)
         from collections import Counter

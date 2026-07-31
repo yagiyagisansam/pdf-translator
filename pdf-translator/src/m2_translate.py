@@ -22,6 +22,9 @@ PROTECT_PATTERNS = [
     ("NUM",   re.compile(r"[<>≈=]?\s?\d[\d.,]*\s?(?:±\s?\d[\d.,]*)?\s?"
                          r"(?:%|cm|mm|m|kg|g|s|ms|Hz|N|m/s2?|°|yrs?|kg/m2|weeks?)?")),
     ("ABBR",  re.compile(r"\b(?:CMVJ|SPJ|AFTE|SPAD|NAMI|NASA|ICC|ES|QA|AVT|3D)\b")),
+    # product/model designators (AW101, EH101, CT7-8E, UK24 ...): keep verbatim so
+    # no engine can transliterate or split them
+    ("MODEL", re.compile(r"\b[A-Z]{1,5}\d{1,4}(?:-\d+[A-Z]*|-[A-Z]+\d*)?\b")),
 ]
 
 def protect(text):
@@ -66,7 +69,8 @@ _BULLET_RE = re.compile(r"^\s*[•‣⁃▪●–—・·∙]\s*"
                         r"|^\s*[-–—]\s+")
 
 FOOTER_RE = re.compile(r"(doi:|©|\u00a9|rights reserved|front matter|\d{4}-\d{3,4}|"
-                       r"Corresponding author|E-mail address)", re.I)
+                       r"Corresponding author|E-mail address|"
+                       r"Received \d|received in revised|accepted \d)", re.I)
 
 def _is_footer(text):
     return bool(FOOTER_RE.search(text or ""))
@@ -89,8 +93,24 @@ def _continues(prev_text, next_text, next_type):
     if not t.endswith(SENT_END):
         if h[:1].islower() or h[:1] in "(\u2018\u2019\"'" or h[:1].isdigit():
             return True
-        return True
+        # next starts with a CAPITAL: only flowing prose continues like this
+        # (a proper noun mid-sentence). A short block is a standalone label
+        # (diagram callout, list heading) - merging labels chains unrelated
+        # text into one garbled unit, so require real paragraph length.
+        return len(t) >= 80
     return False
+
+
+def _geom_adjacent(pb, nb):
+    """nb sits directly under pb with horizontal overlap - i.e. they are the
+    same visual text island. Used on landscape pages (slides/spreads), where
+    text is scattered islands and reading-order 'continuation' across islands
+    must never merge them."""
+    lh = max((nb["bottom"] - nb["top"]) / max(nb.get("nlines", 1), 1), 1.0)
+    gap = nb["top"] - pb["bottom"]
+    ov = min(pb["x1"], nb["x1"]) - max(pb["x0"], nb["x0"])
+    wmin = min(pb["x1"] - pb["x0"], nb["x1"] - nb["x0"]) or 1.0
+    return -4 <= gap <= max(2.0 * lh, 16.0) and ov >= 0.45 * wmin
 
 def build_units(layout):
     """Build translation units by walking the GLOBAL reading order and merging
@@ -114,10 +134,13 @@ def build_units(layout):
         return f"{pi}:{bi}"
 
     # 1) flatten translatable blocks into global reading order (page, then order)
+    #    (blocks with no letters - stray bullet markers, symbols - stay verbatim
+    #    on the page; there is nothing to translate)
     seq = []
     for pi, page in enumerate(pages):
         ordered = sorted(
-            [(bi, b) for bi, b in enumerate(page["blocks"]) if b["type"] in TRANSLATABLE],
+            [(bi, b) for bi, b in enumerate(page["blocks"])
+             if b["type"] in TRANSLATABLE and re.search(r"[A-Za-z]", b["text"])],
             key=lambda x: x[1].get("order", 1e9))
         for bi, b in ordered:
             seq.append((pi, bi, b))
@@ -146,6 +169,10 @@ def build_units(layout):
                 landscape = (pages[npi]["width"] > pages[npi]["height"] or
                              pages[ppi]["width"] > pages[ppi]["height"])
                 if cross_page and landscape:
+                    break
+                # On a landscape page (slide/spread) text is scattered islands;
+                # merge only blocks that are geometrically one island.
+                if landscape and not _geom_adjacent(pb, nb):
                     break
                 # a new list item (bullet / dash marker) is a hard boundary, so
                 # each bullet stays its own unit and keeps its original position

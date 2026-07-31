@@ -82,7 +82,10 @@ def _jp_on_english_overlaps(path):
         for pi, page in enumerate(pdf.pages, start=1):
             words = page.extract_words()
             jp = [w for w in words if _is_jp(w["text"])]
-            en = [w for w in words if _is_latin_word(w["text"])]
+            # rotated English (chart axis labels) is figure content that stays
+            # on the page by design - not residual body text
+            en = [w for w in words
+                  if _is_latin_word(w["text"]) and w.get("upright", True)]
             if not jp or not en:
                 continue
             for e in en:
@@ -93,6 +96,16 @@ def _jp_on_english_overlaps(path):
                         hits.append((pi, e["text"], round(e["x0"]), round(e["top"])))
                         break
     return hits
+
+
+def _unit_bbox(u, layout):
+    """Union bbox of a unit's source blocks."""
+    bs = [layout["pages"][pi]["blocks"][bi] for pi, bi in
+          (map(int, s.split(":")) for s in u.get("spans", []))]
+    if not bs:
+        return None
+    return {"x0": min(b["x0"] for b in bs), "x1": max(b["x1"] for b in bs),
+            "top": min(b["top"] for b in bs), "bottom": max(b["bottom"] for b in bs)}
 
 
 def _allowed_latin_blob(units, layout):
@@ -177,6 +190,15 @@ def review(name, editor_report):
         for f in p.get("figures", []):
             for ln in lines:
                 if _rects_overlap(ln, f, pad=-2.0):
+                    # text whose SOURCE block already sat on this figure (a
+                    # cover title on a background photo) is faithful, not a
+                    # defect - only text that MOVED onto a figure is flagged
+                    uid = ln.get("uid")
+                    if uid is not None:
+                        src = _unit_bbox(units[uid], layout) \
+                            if 0 <= uid < len(units) else None
+                        if src and _rects_overlap(src, f, pad=-2.0):
+                            continue
                     defects.append({"role": "editor", "kind": "figure_overlap",
                                     "detail": f"page {p['page']} text over figure",
                                     "param": "shrink"})
@@ -200,6 +222,73 @@ def review(name, editor_report):
                                           f"near y={round(rband['top'])}",
                                 "param": "shrink"})
                 break
+
+    # --- layout fidelity vs the SOURCE (配置が元PDFと同じか) -----------------
+    # Mechanical guarantee, any document: in per-region mode every unit must be
+    # drawn AT its source block's position and at a comparable font size; in
+    # reflow mode the Japanese must stay inside the page's original text band.
+    mode = editor_report.get("mode", "reflow")
+    body_sizes = sorted(p.get("body_size") or 0 for p in layout["pages"])
+    doc_body = (body_sizes[len(body_sizes) // 2] if body_sizes else 10) or 10
+    if mode == "region":
+        import statistics as _st
+        src_geo = {}
+        for u in units:
+            if not u.get("target"):
+                continue
+            bs = [layout["pages"][pi]["blocks"][bi] for pi, bi in
+                  (map(int, s.split(":")) for s in u["spans"])]
+            src_geo[u["uid"]] = {
+                "x0": min(b["x0"] for b in bs),
+                "top": min(b["top"] for b in bs),
+                "size": _st.median([b["size"] for b in bs if b.get("size")] or [0]),
+            }
+        drawn = {}
+        for lines in placed.values():
+            for ln in lines:
+                uid = ln.get("uid")
+                if uid is None:
+                    continue
+                d = drawn.setdefault(uid, {"x0": 1e9, "top": 1e9, "size": 0})
+                d["x0"] = min(d["x0"], ln["x0"])
+                d["top"] = min(d["top"], ln["top"])
+                d["size"] = max(d["size"], ln.get("size") or 0)
+        drift, small = [], []
+        for uid, g in src_geo.items():
+            d = drawn.get(uid)
+            if not d:
+                continue
+            # x must match the source block; top may only move down a little
+            # (figure/caption clearance), never jump elsewhere on the page
+            if abs(d["x0"] - g["x0"]) > 14 or not (-8 <= d["top"] - g["top"] <= 42):
+                drift.append(uid)
+            if g["size"] >= 1.3 * doc_body and d["size"] \
+                    and d["size"] < 0.55 * g["size"]:
+                small.append(uid)   # display text (title) rendered tiny
+        if drift:
+            defects.append({"role": "editor", "kind": "layout_drift",
+                            "detail": f"{len(drift)} unit(s) drawn away from the "
+                                      f"source position: uids {drift[:8]}",
+                            "param": "shrink"})
+        if small:
+            defects.append({"role": "editor", "kind": "size_fidelity",
+                            "detail": f"{len(small)} display unit(s) far smaller "
+                                      f"than the source: uids {small[:8]}",
+                            "param": "shrink"})
+    else:
+        stray = []
+        for p in layout["pages"]:
+            if not p["blocks"]:
+                continue
+            x_lo = min(b["x0"] for b in p["blocks"]) - 10
+            x_hi = max(b["x1"] for b in p["blocks"]) + 10
+            for ln in placed.get(str(p["page"]), []):
+                if ln["x0"] < x_lo or ln["x1"] > x_hi:
+                    stray.append((p["page"], ln["text"][:20]))
+        if stray:
+            defects.append({"role": "editor", "kind": "layout_drift",
+                            "detail": f"{len(stray)} line(s) outside the source "
+                                      f"text band: {stray[:6]}", "param": "shrink"})
 
     if editor_report.get("overflow"):
         defects.append({"role": "editor", "kind": "overflow",

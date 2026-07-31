@@ -314,29 +314,47 @@ def _wrap(text, font, size, max_w):
     if cur: lines.append(cur)
     return lines
 
-def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws):
+def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
+                              src_size=0.0, uid=None, src_lines=0):
     """Flow `text` across the unit's regions (in reading order). Pick the largest
     font (capped) such that all wrapped lines fit within the total region capacity,
     then lay lines into region 1, overflow into region 2, etc. Line slots skip
     the region's obstacle bands (foreign blocks/figures inside the box), so no
-    overlap with neighbours or figures is possible."""
+    overlap with neighbours or figures is possible.
+
+    Layout fidelity: the font size TRACKS THE SOURCE block's size (a 39pt cover
+    title stays a display title, a 7pt diagram label stays a small label) instead
+    of a one-size-fits-all cap - shrinking only as far as needed to fit."""
     if not text:
         return
     font = "NotoJP-Bold" if btype in ("heading", "title") else "NotoJP"
-    FLOOR = 5.5
-    CAP = 10.5
+    if src_size:
+        CAP = min(42.0, max(4.5, src_size * 1.05))
+        FLOOR = max(4.0, min(5.5, src_size * 0.7))
+    else:
+        FLOOR = 5.5
+        CAP = 10.5
 
     def region_slots(rb, size):
         """y positions where a line of this size can be drawn: a fixed grid from
-        the region top, minus slots that intersect an obstacle band."""
+        the region top, minus slots that intersect an obstacle band. A TALL
+        obstacle (a photo/figure) ENDS the region: text must never jump across
+        it and reappear somewhere visually unrelated below."""
         lh = size * 1.16
         obstacles = rb.get("obstacles", ())
+        big = max(3.0 * lh, 30.0)
         slots = []
         y = rb["top"]
         while y + lh <= rb["avail_bottom"] + 0.1:
-            if not any(y < ob and y + lh > ot for (ot, ob) in obstacles):
+            hit = next(((ot, ob) for (ot, ob) in obstacles
+                        if y < ob and y + lh > ot), None)
+            if hit is None:
                 slots.append(y)
-            y += lh
+                y += lh
+                continue
+            if hit[1] - hit[0] > big:
+                break
+            y = hit[1]
         return slots, lh
 
     def total_fits(size):
@@ -360,6 +378,15 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws):
         size -= 0.25
     size = max(FLOOR, size)
 
+    # Display text (title/heading) keeps its source LINE COUNT: "AW101" set as a
+    # one-line 39pt cover title must stay one line - shrink slightly rather than
+    # wrap ("AW10 / 1"). Only for single-region display units; body paragraphs
+    # may legitimately need more lines in Japanese.
+    if src_lines and len(regs) == 1 and btype in ("title", "heading"):
+        w = max(10, regs[0][1]["x1"] - regs[0][1]["x0"])
+        while size > FLOOR and len(_wrap(text, font, size, w)) > src_lines:
+            size -= 0.25
+
     # distribute lines into each region's free slots
     remaining = text
     for ri, (pi, rb) in enumerate(regs):
@@ -371,7 +398,7 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws):
         take = lines[:len(slots)]
         for y, ln in zip(slots, take):
             per_page_draws[pi].append({"x": rb["x0"], "y_top": y, "size": size,
-                                       "font": font, "line": ln})
+                                       "font": font, "line": ln, "uid": uid})
         remaining = _remaining_after(remaining, take)
         if not remaining:
             break
@@ -422,6 +449,12 @@ def generate(name, src_path):
         # chart axis labels render slightly OUTSIDE the detected image bbox)
         for f in figs:
             if not overlaps_x(x0, x1, f["x0"], f["x1"]):
+                continue
+            # text DESIGNED on the figure (a callout label / cover title overlaid
+            # on a photo) keeps its position - only text clipping the figure's
+            # edge is pushed clear of it
+            ov_y = min(bottom, f["bottom"]) - max(top, f["top"])
+            if ov_y >= 0.6 * max(bottom - top, 1.0):
                 continue
             clear = CAP_CLEAR if btype == "caption" else FIG_MARGIN
             fb = f["bottom"] + clear
@@ -500,6 +533,22 @@ def generate(name, src_path):
             translated_blocks |= rb["own"]
     for pi, p in enumerate(layout["pages"]):
         page_regs = regs_by_page.get(pi, [])
+        # Mutually-exclusive horizontal lanes: a region whose source lines poke
+        # into a sibling column that shares its vertical range is clamped at the
+        # sibling's left edge, so two columns' text can never interleave (the
+        # vertical-band obstacle pass below cannot express side-by-side regions
+        # that START at the same y).
+        for rb in page_regs:
+            for rb2 in page_regs:
+                if rb2 is rb:
+                    continue
+                y_ov = min(rb["avail_bottom"], rb2["avail_bottom"]) \
+                    - max(rb["top"], rb2["top"])
+                if y_ov <= 0:
+                    continue
+                if rb["x0"] < rb2["x0"] < rb["x1"] <= rb2["x1"] + 20:
+                    if rb["x1"] - rb2["x0"] <= 0.45 * (rb["x1"] - rb["x0"]):
+                        rb["x1"] = rb2["x0"] - 2.0
         visible = [b for b in p["blocks"] if id(b) not in translated_blocks]
         for rb in page_regs:
             bands = rb["obstacles"]
@@ -514,6 +563,11 @@ def generate(name, src_path):
             for f in p.get("figures", []):
                 if overlaps_x(rb["x0"], rb["x1"], f["x0"], f["x1"]):
                     bands.append((f["top"] - 8.0, f["bottom"] + 8.0))
+            # vector rules (table borders, separators) stay in place - text must
+            # flow around them, never across (no strikethrough-looking lines)
+            for r in p.get("rules", []):
+                if overlaps_x(rb["x0"], rb["x1"], r["x0"], r["x1"]):
+                    bands.append((r["top"] - 2.0, r["bottom"] + 2.0))
             # keep only bands that actually cut into this region's slot range,
             # and never let a band that covers the region's own start erase the
             # whole region (mutually-overlapping source boxes would deadlock)
@@ -538,8 +592,18 @@ def generate(name, src_path):
         mb=page.mediabox
         page_sizes.append((float(mb.width),float(mb.height),float(mb.left),float(mb.bottom)))
     per_page_draws={pi:[] for pi in range(npages)}
+    import statistics as _st
     for uid,(u,regs) in unit_regions.items():
-        _flow_unit_across_regions(u["target"], u["type"], regs, layout, per_page_draws)
+        sizes=[]; nlines=0
+        for s in u["spans"]:
+            spi,sbi=map(int,s.split(":"))
+            b=layout["pages"][spi]["blocks"][sbi]
+            if b.get("size"): sizes.append(b["size"])
+            nlines += b.get("nlines", 1)
+        src_size=_st.median(sizes) if sizes else 0.0
+        _flow_unit_across_regions(u["target"], u["type"], regs, layout,
+                                  per_page_draws, src_size=src_size, uid=uid,
+                                  src_lines=nlines)
 
     # Persist the actually-drawn line boxes so M4 can verify text/figure overlap
     # on real placement data instead of the pre-layout block bboxes.
@@ -549,7 +613,7 @@ def generate(name, src_path):
             {"x0": d["x"], "top": d["y_top"],
              "x1": d["x"] + stringWidth(d["line"], d["font"], d["size"]),
              "bottom": d["y_top"] + d["size"] * 1.16,
-             "text": d["line"][:40]}
+             "text": d["line"][:40], "uid": d.get("uid"), "size": d["size"]}
             for d in draws]
     with open(f"{OUT}/{name}_placed.json", "w") as f:
         json.dump(placed, f)
