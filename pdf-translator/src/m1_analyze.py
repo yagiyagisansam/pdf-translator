@@ -308,8 +308,10 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
     t = b["text"]
     if CAP_RE.match(t):
         return "caption"
-    # numeric/table-like rows (e.g. "Week 1 2 3 4 5", "6 5", "Total volume 25 30 35")
-    toks = t.split()
+    # numeric/table-like rows (e.g. "Week 1 2 3 4 5", "6 5", "Total volume 25 30 35").
+    # Dot-leader tokens (TOC rows) are ignored so a titled TOC entry
+    # ("5-1-1. Preflight Preparation . . . .") stays translatable text.
+    toks = [tk for tk in t.split() if tk.strip(".·⋅⋯") != ""]
     if len(toks) >= 2:
         numlike = sum(1 for tk in toks if re.fullmatch(r"[\d.,%×x±+\-/()]+", tk))
         if numlike / len(toks) > 0.5:
@@ -514,7 +516,10 @@ _UNIT_TOKEN_RE = re.compile(
 
 
 def _numericish(text):
-    toks = text.split()
+    # dot-leader tokens (". . . . ." in TOC rows) carry no meaning and must not
+    # inflate the numeric ratio - "5-1-1. Preflight Preparation . . . . 2/20/25"
+    # is a TOC TITLE row whose text needs translating, not table data
+    toks = [t for t in text.split() if t.strip(".·⋅⋯") != ""]
     if not toks or not _DIGIT_ANY_RE.search(text):
         return False
     hits = sum(1 for t in toks
@@ -618,6 +623,14 @@ def analyze_pdf(path, name, render=True):
     ref_started = False   # once the reference list begins it runs to the doc end,
                           # so this persists across pages (a reference whose last
                           # line wraps onto the next page's top has no number)
+    # A bibliography exists ONLY after an explicit References/Bibliography
+    # heading. Numbered-line patterns alone are NOT evidence: a regulation
+    # manual's numbered paragraphs ("1. Accuracy. The accuracy of ...") would
+    # otherwise classify half the document as untranslatable references.
+    ref_heading_seen = False
+    REF_HEAD_RE = re.compile(
+        r"^\s*(?:[\divxlc]+[.)]?\s*)?(references|bibliography|works cited|"
+        r"literature cited|further reading|sources and bibliography)\s*$", re.I)
     npages = len(pdf.pages)
     for pi, page in enumerate(pdf.pages):
         pw, ph = page.width, page.height
@@ -641,10 +654,19 @@ def analyze_pdf(path, name, render=True):
         page_rules = horizontal_rules(page)
         blocks = group_blocks(lines, mid, left, right, body_size,
                               rules=page_rules)
-        # reference zone: page where many ref-pattern lines
-        is_ref = sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3
+        # reference zone: only at/after an explicit References heading, on a
+        # page with many ref-pattern lines
+        ref_head_top = None
+        for l in lines:
+            if REF_HEAD_RE.match(l["text"].strip()):
+                ref_heading_seen = True
+                ref_head_top = l["top"] if ref_head_top is None else \
+                    min(ref_head_top, l["top"])
+        is_ref = ref_heading_seen and \
+            sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3
         for b in blocks:
-            b["type"] = classify_block(b, body_size, pi, ph, is_ref)
+            zone = is_ref and (ref_head_top is None or b["top"] >= ref_head_top - 2)
+            b["type"] = classify_block(b, body_size, pi, ph, zone)
         # A bibliography entry spans several lines but only the FIRST (numbered)
         # line matches REF_RE; the continuation lines fell through to "body" and got
         # translated. Once the numbered list has started it runs to the document end,
@@ -654,12 +676,14 @@ def analyze_pdf(path, name, render=True):
         # in the BACK HALF of the document: bibliographies live at the end, whereas
         # a numbered METHODS/protocol list ("1. Participants were...") is early and
         # would otherwise poison every following page as "reference" (untranslated).
-        if (is_ref or ref_started) and pi >= npages * 0.5:
+        if ref_heading_seen and (is_ref or ref_started) and pi >= npages * 0.5:
             NUM_RE = re.compile(r"^\[?\d+[.\]]")
             for col in sorted({b.get("col", 0) for b in blocks}):
                 cb = sorted((b for b in blocks if b.get("col", 0) == col),
                             key=lambda b: b["top"])
                 for b in cb:
+                    if b["top"] < (ref_head_top or -1) - 2 and not ref_started:
+                        continue
                     if b["type"] == "reference" or NUM_RE.match(b["text"].strip()):
                         b["type"] = "reference"; ref_started = True
                     elif ref_started and b["type"] in ("body", "heading"):
