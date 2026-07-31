@@ -340,11 +340,13 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
         return "title"
     if (b["bold"] and HEAD_RE.match(t)) or HEAD_RE.match(t) or (b["bold"] and b["size"] >= body_size * 1.05 and len(t) < 60):
         return "heading"
-    # BOLD, mostly-UPPERCASE short lines are headings even at body size
-    # ("h. 7-1-1. NATIONAL WEATHER SERVICE ..." in regulation manuals) - typed
-    # as body they chain the following paragraphs into one run-on unit
+    # Mostly-UPPERCASE short blocks are headings even at body size and even
+    # without a bold flag ("h. 7-1-1. NATIONAL WEATHER SERVICE ..." in
+    # regulation manuals mark headings by CAPS alone) - typed as body they
+    # chain the following paragraphs into one run-on unit
     letters = [c for c in t if c.isalpha()]
-    if b["bold"] and letters and len(t) < 120 and b.get("nlines", 1) <= 3 \
+    if len(letters) >= 6 and b.get("nlines", 1) <= 3 \
+            and len(t) < 70 * max(1, b.get("nlines", 1)) \
             and sum(1 for c in letters if c.isupper()) / len(letters) >= 0.7:
         return "heading"
     # a lone capitalized word on its own line is a section label
@@ -352,6 +354,16 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
     if b.get("nlines", 1) == 1 and re.fullmatch(r"[A-Z][A-Za-z]{2,15}", t.strip()):
         return "heading"
     return "body"
+
+def _caps_ratio(text):
+    """Uppercase ratio, or None when there are too few letters to be a
+    meaningful case profile (a trailing "SPJ)." fragment must not read as an
+    all-caps heading)."""
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 6:
+        return None
+    return sum(1 for c in letters if c.isupper()) / len(letters)
+
 
 def _typical_line_gap(lines):
     """Median vertical gap between a line and the nearest line below it that
@@ -455,6 +467,16 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                 if max(s1, s2) / max(0.1, min(s1, s2)) > 1.25:
                     continue    # different font sizes = different roles (title vs
                                 # author line, label vs body) - keep them apart
+                # CASE-PROFILE boundary: an ALL-CAPS line joining a mixed-case
+                # block (or vice versa) is a heading meeting body text - some
+                # PDFs mark headings by CAPS alone, with no bold flag and no
+                # size change (FAA manuals), and merging them chains every
+                # section of the page into one run-on block
+                cr_l = _caps_ratio(l["text"])
+                cr_b = _caps_ratio(b["lines"][-1]["text"])
+                if cr_l is not None and cr_b is not None and \
+                        ((cr_l >= 0.7 and cr_b < 0.45) or (cr_l < 0.45 and cr_b >= 0.7)):
+                    continue
                 if l["x0"] - b["x0"] > page_text_w * 0.03:
                     continue    # indented line = new paragraph
                 score = (ov / wmin, -gap)
