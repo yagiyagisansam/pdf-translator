@@ -400,7 +400,8 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
         return
     font = "NotoJP-Bold" if btype in ("heading", "title") else "NotoJP"
     if src_size:
-        CAP = min(42.0, max(4.5, src_size * 1.05))
+        # quantize to the 0.25pt grid so the glyph-width cache stays bounded
+        CAP = round(min(42.0, max(4.5, src_size * 1.05)) * 4) / 4.0
         FLOOR = max(4.0, min(5.5, src_size * 0.7))
     else:
         FLOOR = 5.5

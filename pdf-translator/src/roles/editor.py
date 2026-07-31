@@ -105,8 +105,13 @@ def _unit_size(u, factor):
     Reflow used to draw the whole page at ONE size, which meant the tightest
     band (a 9pt footnote zone) forced the entire page to the floor size. Per-
     unit sizes keep the source hierarchy (20pt heading / 12pt body / 9pt
-    footnote) and let each band fit its own slot."""
-    return max(4.0, min(42.0, (u.get("_size") or 10.0) * factor))
+    footnote) and let each band fit its own slot.
+
+    QUANTIZED to a 0.25pt grid: m3's per-(font,size) glyph-width cache is keyed
+    by exact size - unquantized src*factor floats mint thousands of one-off
+    cache keys on a dense document and exhaust memory (the AIM OOM)."""
+    size = max(4.0, min(42.0, (u.get("_size") or 10.0) * factor))
+    return round(size * 4) / 4.0
 
 
 def _unit_lines(units, factor, width, font_of):
