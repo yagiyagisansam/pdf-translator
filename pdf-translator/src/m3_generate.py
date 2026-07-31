@@ -136,10 +136,10 @@ _FRAG_RE = re.compile(
     r"\d{1,4}|\d{1,3}[-–,]\d{1,3}|[±×<>=]+)$", re.I)
 
 # Longest run of consecutive fragment ops the pass-2 sweep will drop as a single
-# paragraph-internal cluster. Real clusters (author markers a-e, woven citations)
-# are short; a longer contiguous run of frags is structured content (a numeric
-# table) that must survive even when sandwiched between translated paragraphs.
-_MAX_FRAG_RUN = 6
+# paragraph-internal cluster. Author affiliation chains ("a , b , c , ∗ ,") run
+# to ~8-10 ops; genuine table content is protected individually by keep_tokens
+# (see keep_tokens_for), so the cap only backstops pathological runs.
+_MAX_FRAG_RUN = 12
 
 def _parse_tounicode(data):
     """Parse a /ToUnicode CMap stream into {code:int -> unicode:str}. Handles the
@@ -400,7 +400,8 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
         return
     font = "NotoJP-Bold" if btype in ("heading", "title") else "NotoJP"
     if src_size:
-        CAP = min(42.0, max(4.5, src_size * 1.05))
+        # quantize to the 0.25pt grid so the glyph-width cache stays bounded
+        CAP = round(min(42.0, max(4.5, src_size * 1.05)) * 4) / 4.0
         FLOOR = max(4.0, min(5.5, src_size * 0.7))
     else:
         FLOOR = 5.5

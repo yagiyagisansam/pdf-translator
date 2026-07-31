@@ -145,25 +145,6 @@
      "order": 7
     },
     {
-     "col": 0,
-     "color": [
-      0.0,
-      0.0,
-      0.0
-     ],
-     "x0": 84.6318,
-     "x1": 586.76544288,
-     "top": 291.29129584,
-     "bottom": 431.76250479999993,
-     "text": "Assisted jumping may be useful in training higher concentric movement speed in jumping, thereby potentially increasing the jumping abilities of athletes. The purpose of this study was to evaluate the effects of assisted jump training on counter-movement vertical jump (CMVJ) and spike jump (SPJ) ability in a group of elite male volleyball players. Seven junior national team volleyball players (18.0±1.0yrs, 200.4±6.7cm, and 84.0±7.2kg) participated in this within-subjects cross-over counter-balanced training study. Assisted training involved 3 sessions per week of CMVJ training with 10kg of assistance, applied through use of a bungee system, whilst normal jump training involved equated volume of unassisted counter-movement vertical jumps. Training periods were 5 weeks duration, with a 3-week wash-out separating them. Prior to and at the conclusion of each training period jump testing for CMVJ and SPJ height was conducted. Assisted jump training resulted in gains of 2.7±0.7cm (p<0.01, ES=0.21) and 4.6±2.6cm (p<0.01, ES=0.32) for the CMVJ and SPJ respectively, whilst normal jump training did not result in signiﬁcant gains for either CMVJ or SPJ (p=0.09 and p=0.51 respectively). The changes associated with normal jump training and assisted jump training revealed signiﬁcant differences in both CMVJ and SPJ (p= <0.03) in favour of the assisted jump condition, with large effect (CMVJ, ES=1.22; SPJ, ES=1.31). Assisted jumping may promote the leg extensor musculature to undergo a more rapid rate of shortening, and chronic exposure appears to improve jumping ability. © 2010 Sports Medicine Australia. Published by Elsevier Ltd. All rights reserved.",
-     "size": 9.0,
-     "bold": false,
-     "nlines": 13,
-     "num_lines": 0,
-     "type": "body",
-     "order": 8
-    },
-    {
      "col": 1,
      "color": [
       0.0,
@@ -180,7 +161,7 @@
      "nlines": 1,
      "num_lines": 0,
      "type": "heading",
-     "order": 9
+     "order": 8
     },
     {
      "col": 0,
@@ -190,16 +171,16 @@
       0.0
      ],
      "x0": 84.6318,
-     "x1": 448.5465659999999,
-     "top": 671.8889117,
-     "bottom": 689.8216367,
-     "text": "1440-2440/$ – see front matter © 2010 Sports Medicine Australia. Published by Elsevier Ltd. All rights reserved. doi:10.1016/j.jsams.2010.07.006",
-     "size": 8.0,
+     "x1": 586.76544288,
+     "top": 291.29129584,
+     "bottom": 431.76250479999993,
+     "text": "Assisted jumping may be useful in training higher concentric movement speed in jumping, thereby potentially increasing the jumping abilities of athletes. The purpose of this study was to evaluate the effects of assisted jump training on counter-movement vertical jump (CMVJ) and spike jump (SPJ) ability in a group of elite male volleyball players. Seven junior national team volleyball players (18.0±1.0yrs, 200.4±6.7cm, and 84.0±7.2kg) participated in this within-subjects cross-over counter-balanced training study. Assisted training involved 3 sessions per week of CMVJ training with 10kg of assistance, applied through use of a bungee system, whilst normal jump training involved equated volume of unassisted counter-movement vertical jumps. Training periods were 5 weeks duration, with a 3-week wash-out separating them. Prior to and at the conclusion of each training period jump testing for CMVJ and SPJ height was conducted. Assisted jump training resulted in gains of 2.7±0.7cm (p<0.01, ES=0.21) and 4.6±2.6cm (p<0.01, ES=0.32) for the CMVJ and SPJ respectively, whilst normal jump training did not result in signiﬁcant gains for either CMVJ or SPJ (p=0.09 and p=0.51 respectively). The changes associated with normal jump training and assisted jump training revealed signiﬁcant differences in both CMVJ and SPJ (p= <0.03) in favour of the assisted jump condition, with large effect (CMVJ, ES=1.22; SPJ, ES=1.31). Assisted jumping may promote the leg extensor musculature to undergo a more rapid rate of shortening, and chronic exposure appears to improve jumping ability. © 2010 Sports Medicine Australia. Published by Elsevier Ltd. All rights reserved.",
+     "size": 9.0,
      "bold": false,
-     "nlines": 2,
+     "nlines": 13,
      "num_lines": 0,
      "type": "body",
-     "order": 10
+     "order": 9
     },
     {
      "col": 1,
@@ -218,7 +199,7 @@
      "nlines": 1,
      "num_lines": 0,
      "type": "body",
-     "order": 11
+     "order": 10
     },
     {
      "col": 1,
@@ -237,7 +218,7 @@
      "nlines": 1,
      "num_lines": 0,
      "type": "heading",
-     "order": 12
+     "order": 11
     },
     {
      "col": 1,
@@ -256,7 +237,7 @@
      "nlines": 9,
      "num_lines": 0,
      "type": "body",
-     "order": 13
+     "order": 12
     },
     {
      "col": 1,
@@ -275,7 +256,7 @@
      "nlines": 2,
      "num_lines": 0,
      "type": "body",
-     "order": 14
+     "order": 13
     },
     {
      "col": 2,
@@ -292,6 +273,25 @@
      "size": 10.0,
      "bold": false,
      "nlines": 14,
+     "num_lines": 0,
+     "type": "body",
+     "order": 14
+    },
+    {
+     "col": 0,
+     "color": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "x0": 84.6318,
+     "x1": 448.5465659999999,
+     "top": 671.8889117,
+     "bottom": 689.8216367,
+     "text": "1440-2440/$ – see front matter © 2010 Sports Medicine Australia. Published by Elsevier Ltd. All rights reserved. doi:10.1016/j.jsams.2010.07.006",
+     "size": 8.0,
+     "bold": false,
+     "nlines": 2,
      "num_lines": 0,
      "type": "body",
      "order": 15
@@ -499,6 +499,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 0,
+     "record": true,
      "type": "data",
      "order": 8
     },
@@ -518,6 +519,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 9
     },
@@ -537,6 +539,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 10
     },
@@ -556,6 +559,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 11
     },
@@ -575,6 +579,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 12
     },
@@ -594,6 +599,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 13
     },
@@ -613,6 +619,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 0,
+     "record": true,
      "type": "data",
      "order": 14
     },
@@ -632,6 +639,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 15
     },
@@ -651,6 +659,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 16
     },
@@ -670,6 +679,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 17
     },
@@ -689,6 +699,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 18
     },
@@ -708,6 +719,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 19
     },
@@ -727,6 +739,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 0,
+     "record": true,
      "type": "data",
      "order": 20
     },
@@ -746,6 +759,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 21
     },
@@ -765,6 +779,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 22
     },
@@ -784,6 +799,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 23
     },
@@ -803,6 +819,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 24
     },
@@ -822,6 +839,7 @@
      "bold": false,
      "nlines": 1,
      "num_lines": 1,
+     "record": true,
      "type": "data",
      "order": 25
     }
