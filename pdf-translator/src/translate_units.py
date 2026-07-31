@@ -91,6 +91,19 @@ def run(name: str, engine: str = "mock"):
         for i, r in zip(miss, fresh):
             results[i] = r
         if validate:
+            # one retry for units the engine returned NOTHING for (free
+            # endpoints intermittently return an empty translation) - a second
+            # attempt usually succeeds and an English paragraph left behind is
+            # far more visible than one extra request
+            empty = [i for i in miss if not results[i] and items[i]["text"].strip()]
+            if empty:
+                print(f"[{name}] retrying {len(empty)} unit(s) with empty results",
+                      file=sys.stderr)
+                redo = _safe_batch(translator.translate_batch,
+                                   [items[i] for i in empty])
+                for i, r in zip(empty, redo):
+                    if r:
+                        results[i] = r
             # one retry for units whose placeholders did not survive
             bad = [i for i in miss
                    if results[i] and not _placeholders_ok(items[i]["text"], results[i])]

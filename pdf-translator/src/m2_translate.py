@@ -100,6 +100,11 @@ def _continues(prev_text, next_text, next_type):
     # hyphenated word split across blocks
     if t.endswith("-"):
         return True
+    # a paragraph ending with a FOOTNOTE/CITATION marker ("...compact area).4",
+    # "...ability.4–6") IS sentence-final - without stripping the trailing
+    # digits, consecutive paragraphs chain into one giant unit
+    if re.sub(r"[\s\d,–\-]+$", "", t).endswith(SENT_END):
+        return False
     # prev ends mid-sentence (no terminal punctuation) and next looks like a continuation
     if not t.endswith(SENT_END):
         if h[:1].islower() or h[:1] in "(\u2018\u2019\"'" or h[:1].isdigit():

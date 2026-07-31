@@ -27,7 +27,11 @@ the next begins. Communicate in Japanese with the user when summarizing progress
      title stays display-size; a 7pt callout label stays small). QA enforces this
      mechanically (layout_drift / size_fidelity defects).
    - **reflow** (papers/reports): figures fixed, Japanese reflowed by reading order into
-     the page's column structure.
+     the page's column structure. Reflow is PER-UNIT SIZED (each unit at its source
+     block size x a page shrink factor - never one uniform page size), VERTICALLY
+     ANCHORED (a band never starts above its source y), margin units (side captions)
+     keep their own bbox, and very-unequal column lanes (<0.7 width ratio) flow
+     independently instead of newspaper-balancing.
 
 ## The single biggest gotcha: coordinates
 `pdfplumber` page coordinates and the PDF **content-stream** coordinates do **not** line up
@@ -82,6 +86,17 @@ length (>=80 chars), so short labels never chain.
 - Photo-dominated documents (median figure coverage >= 30%) use region mode
   even when portrait.
 - Bare bullet-marker blocks ("•") are neither translated nor obstacles.
+- RECORD ROWS (a line with a nearby numeric row-mate: TOC rows, table rows) are
+  sealed one-line blocks - never merged into paragraphs.
+- The fragment sweep never deletes tokens of KEPT blocks (TOC page numbers,
+  table cells) - see keep_tokens in remove_text_by_content.
+- Link underlines (rules inside a text block's bbox) are NOT obstacles.
+- Repeated page furniture is detected at the top AND bottom margins.
+- Scanned pages with an OCR text layer are REJECTED with a clear message
+  (image pixels cannot be edited; overlaying would double-print).
+- Security posture (webapp): whole-site Basic auth + per-IP rate limit + job
+  wall-clock timeout + page-count cap + strict security headers + non-root
+  container. Keep all of these when touching webapp.py / Dockerfile.
 
 ## Known remaining issues (open work, prioritised in docs/IMPROVEMENT_PLAN.md)
 - A few stray fragments can survive on the title page (author-line superscript affiliation
