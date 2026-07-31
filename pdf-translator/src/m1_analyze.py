@@ -255,6 +255,11 @@ def _mkline(seg, mw):
             text += " "
         text += c["text"]
         prev = c
+    # unmapped glyphs extract as "(cid:NNN)" - almost always dashes/bullets in
+    # fonts without a ToUnicode map. A dash reads correctly ("00-45"); the
+    # literal "(cid:239)" would pollute the translation input and output.
+    if "(cid:" in text:
+        text = re.sub(r"\(cid:\d+\)", "-", text)
     sizes = [c.get("size", 0) for c in seg if c.get("size")]
     fonts = [c.get("fontname", "") for c in seg]
     bold = sum(1 for f in fonts if "bold" in f.lower()) / max(1, len(fonts))
@@ -334,6 +339,13 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
     if page_idx == 0 and b["size"] >= body_size * 1.5:
         return "title"
     if (b["bold"] and HEAD_RE.match(t)) or HEAD_RE.match(t) or (b["bold"] and b["size"] >= body_size * 1.05 and len(t) < 60):
+        return "heading"
+    # BOLD, mostly-UPPERCASE short lines are headings even at body size
+    # ("h. 7-1-1. NATIONAL WEATHER SERVICE ..." in regulation manuals) - typed
+    # as body they chain the following paragraphs into one run-on unit
+    letters = [c for c in t if c.isalpha()]
+    if b["bold"] and letters and len(t) < 120 and b.get("nlines", 1) <= 3 \
+            and sum(1 for c in letters if c.isupper()) / len(letters) >= 0.7:
         return "heading"
     # a lone capitalized word on its own line is a section label
     # ("Abstract", "Introduction", "References") - a merge boundary, not prose
