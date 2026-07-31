@@ -28,10 +28,12 @@ def _make_synth_pdf(path):
     from reportlab.lib.pagesizes import A4, landscape
 
     c = canvas.Canvas(path, pagesize=A4)
-    # --- portrait cover: small label + display title ------------------------
+    # --- portrait cover: small colored label + display title ----------------
     w, h = A4
+    c.setFillColorRGB(0.8, 0.1, 0.1)   # brand-red label: color must survive
     c.setFont("Helvetica", 10)
     c.drawString(40, h - 380, "ACME ROTORCRAFT DIVISION")
+    c.setFillColorRGB(0, 0, 0)
     c.setFont("Helvetica-Bold", 40)
     c.drawString(40, h - 430, "AW101")
     c.showPage()
@@ -143,6 +145,28 @@ def test_units_do_not_chain_labels(synth):
                     and "Advanced Profile" in u["source"])
         assert not ("machine" in u["source"]
                     and "Composite Rotor Hub" in u["source"])
+
+
+def test_text_color_preserved(synth):
+    """The colored label's fill color is captured so the overlay can draw the
+    Japanese in the source color (a white-on-photo label drawn black is
+    invisible)."""
+    blocks = _blocks(synth, 0)
+    lab = next(b for b in blocks if "ACME" in b["text"])
+    r, g, b = lab.get("color", [0, 0, 0])
+    assert r > 0.6 and g < 0.3 and b < 0.3, lab.get("color")
+
+
+def test_protect_number_word_boundary():
+    """The NUM masking pattern must not eat the first letter of a word:
+    '71 million' once masked as '71 m' + 'illion' and the translation of the
+    mangled remainder was garbage."""
+    sys.path.insert(0, SRC)
+    from m2_translate import protect
+    masked, mapping = protect("A new 71 million Eur (£60 million) investment")
+    assert "⟧illion" not in masked, masked   # token must not swallow the 'm'
+    assert " million" in masked, masked      # the word survives for translation
+    assert all(not v.rstrip().endswith(" m") for v in mapping.values()), mapping
 
 
 def test_placement_fidelity(synth):

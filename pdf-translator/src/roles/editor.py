@@ -21,6 +21,7 @@ Falls back to the proven per-region engine (m3.generate) when reflow cannot fit
 the page even at the floor font, so output is never worse than before.
 """
 import json
+import re
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.lib.colors import Color
@@ -109,15 +110,16 @@ def _unit_lines(units, size, width, font_of):
         if not u.get("target"):
             continue
         font = font_of(u)
+        color = tuple(u.get("_color") or (0, 0, 0))
         if out:
             gap = HEAD_GAP if u["type"] in ("heading", "title") else PARA_GAP
             for _ in range(max(1, round(gap))):
-                out.append((None, font, False))
+                out.append((None, font, False, color))
         wrapped = m3._wrap(u["target"], font, size, width)
         is_head = u["type"] in ("heading", "title")
         for j, ln in enumerate(wrapped):
             last = j == len(wrapped) - 1
-            out.append((ln, font, (not is_head) and (not last)))
+            out.append((ln, font, (not is_head) and (not last), color))
     return out
 
 
@@ -136,7 +138,7 @@ def _flow_column(lines, x0, width, y, y_bottom, bands, lh):
     """Place lines from y downward, skipping obstacle bands. Returns
     (draws, y_end, remainder_lines)."""
     draws = []
-    for i, (txt, font, justify) in enumerate(lines):
+    for i, (txt, font, justify, color) in enumerate(lines):
         while True:
             hit = next(((t, b) for (t, b) in bands if y < b and y + lh > t), None)
             if hit is None:
@@ -146,7 +148,8 @@ def _flow_column(lines, x0, width, y, y_bottom, bands, lh):
             return draws, y, lines[i:]
         if txt is not None:
             draws.append({"x": x0, "y_top": y, "size": None, "font": font,
-                          "line": txt, "width": width, "justify": justify})
+                          "line": txt, "width": width, "justify": justify,
+                          "color": color})
         y += lh
     return draws, y, []
 
@@ -191,6 +194,14 @@ def _layout_page(page, page_units, size, font_of):
     overflow = 0
     full_obs = _obstacles_for(page, g["Lx0"], g["Lx1"])
     for kind, payload in _bands_for_page(page_units):
+        # VERTICAL ANCHOR (layout fidelity): a band never starts ABOVE its
+        # source position. Japanese that runs shorter than the English would
+        # otherwise pull everything below it upward - a bottom-anchored
+        # footnote or a lower section migrating to the top of the page.
+        units_in_band = payload if kind == "full" else \
+            sorted(payload[1] + payload[2], key=lambda u: u["uid"])
+        band_top = min((u.get("_top", y) for u in units_in_band), default=y)
+        y = max(y, band_top)
         if kind == "full":
             lines = _unit_lines(payload, size, g["Lx1"] - g["Lx0"], font_of)
             d, y, rem = _flow_column(lines, g["Lx0"], g["Lx1"] - g["Lx0"], y,
@@ -269,13 +280,16 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
       ~FILL_TARGET full, so a short translation fills the page instead of leaving
       the lower half empty (the "後半部の空白 / 左寄り" the user reported).
     Figures/tables never move; growth stops as soon as any lane would overflow."""
-    # tag each unit with its lane (first block's column) and home page
+    # tag each unit with its lane (first block's column), source top and home page
     by_page = {}
     for u in units:
         if not u.get("target"):
             continue
         spi, sbi = map(int, u["spans"][0].split(":"))
-        u["_lane"] = layout["pages"][spi]["blocks"][sbi].get("col", 0)
+        blk = layout["pages"][spi]["blocks"][sbi]
+        u["_lane"] = blk.get("col", 0)
+        u["_top"] = blk.get("top", 0.0)
+        u["_color"] = blk.get("color")
         by_page.setdefault(spi, []).append(u)
     per_page = {pi: [] for pi in range(len(layout["pages"]))}
     total_overflow = 0
@@ -285,11 +299,17 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
         pu = by_page.get(pi, [])
         if not pu:
             continue
-        cap_draws, cap_ov = _layout_page(page, pu, CAP, _font_of)
+        # Size fidelity: cap/grow limits TRACK the page's source body size, so
+        # an 8pt press release does not balloon to 15pt just because Japanese
+        # ran short - the output should read like the original document.
+        bs = page.get("body_size") or 10
+        cap = min(CAP, max(6.0, bs * 1.15))
+        grow_cap = min(GROW_CAP, max(cap, bs * 1.4))
+        cap_draws, cap_ov = _layout_page(page, pu, cap, _font_of)
         if cap_ov > 0:
-            # dense page: shrink from CAP down to the largest size that fits
+            # dense page: shrink from cap down to the largest size that fits
             best = None
-            size = CAP - 0.5
+            size = cap - 0.5
             while size >= floor:
                 draws, ov = _layout_page(page, pu, size, _font_of)
                 if ov == 0:
@@ -300,11 +320,11 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
                 best = draws; total_overflow += ov
             per_page[pi] = best
         else:
-            # fits at CAP: grow to fill the columns if the page is underfilled
+            # fits at cap: grow to fill the columns if the page is underfilled
             best = cap_draws
-            if _fill_ratio(page, cap_draws, CAP) < FILL_TARGET:
-                size = CAP + 0.5
-                while size <= GROW_CAP:
+            if _fill_ratio(page, cap_draws, cap) < FILL_TARGET:
+                size = cap + 0.5
+                while size <= grow_cap:
                     draws, ov = _layout_page(page, pu, size, _font_of)
                     if ov > 0:
                         break               # would overflow - keep last good
@@ -324,7 +344,18 @@ def _is_flowing_doc(layout):
     """True when the document's translatable text is dominated by flowing
     multi-line paragraphs (a paper/report) - the only shape column reflow is
     valid for. Scattered short blocks (brochures, posters, forms) must keep
-    per-block positions instead."""
+    per-block positions instead - and so must PHOTO-DOMINATED documents
+    (brochures whose pages are mostly images): their text is design elements
+    anchored to the artwork, not a flowing column."""
+    import statistics
+    covs = []
+    for p in layout["pages"]:
+        area = (p["width"] or 1) * (p["height"] or 1)
+        fa = sum(max(0.0, f["x1"] - f["x0"]) * max(0.0, f["bottom"] - f["top"])
+                 for f in p.get("figures", []))
+        covs.append(min(1.0, fa / area))
+    if covs and statistics.median(covs) >= 0.30:
+        return False
     tot = flowing = 0
     for p in layout["pages"]:
         for b in p["blocks"]:
@@ -387,10 +418,12 @@ def build(name, src_path, floor=6.0):
             if b["type"] in TRANS and f"{pi}:{bi}" in unit_for_block:
                 kill[pi] += m3._norm_txt(b["text"])
                 kill_drop[pi] += m3._norm_txt_drop(b["text"])
-            elif b["type"] in TRANS:
+            elif b["type"] in TRANS and re.search(r"[A-Za-z]", b["text"]):
                 # translatable but NOT covered by a translated unit: its English
                 # stays on the page, so mark it so the reflow treats it as an
-                # obstacle and never draws Japanese over it.
+                # obstacle and never draws Japanese over it. (No-letter blocks -
+                # bare bullet markers, symbols - are NOT obstacles: a "•" must
+                # not cut a whole flow lane in half at its y.)
                 b["_keep_en"] = True
     pdf = Pdf.open(src_path)
     for pi, page in enumerate(pdf.pages):
@@ -423,8 +456,8 @@ def build(name, src_path, floor=6.0):
         c = canvas.Canvas(overlay, pagesize=(pw, ph)) if c is None else c
         if pi:
             c.setPageSize((pw, ph))
-        c.setFillColor(Color(0, 0, 0))
         for d in per_page.get(pi, []):
+            c.setFillColor(Color(*(d.get("color") or (0, 0, 0))))
             cs = _justify_amount(d)
             # pdfplumber x is ALREADY absolute page space (it includes the media
             # box left offset), and the overlay merges into that same space, so we

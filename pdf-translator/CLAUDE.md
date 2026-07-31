@@ -72,6 +72,17 @@ M2 additionally refuses to merge blocks that are not geometrically one island on
 landscape pages, and the capital-start continuation heuristic requires real paragraph
 length (>=80 chars), so short labels never chain.
 
+## Robustness facts worth knowing (2026-07-31, round 2)
+- English removal RECURSES into Form XObjects (InDesign exports draw text there;
+  the page stream alone misses it entirely).
+- The overlay draws Japanese in the SOURCE block's fill color (white-on-photo
+  labels). Spot colors (Separation/DeviceN) are approximated as ink darkness.
+- Reflow bands are VERTICALLY ANCHORED (never start above their source y) and
+  cap/grow sizes track the page's source body size.
+- Photo-dominated documents (median figure coverage >= 30%) use region mode
+  even when portrait.
+- Bare bullet-marker blocks ("•") are neither translated nor obstacles.
+
 ## Known remaining issues (open work, prioritised in docs/IMPROVEMENT_PLAN.md)
 - A few stray fragments can survive on the title page (author-line superscript affiliation
   markers a/b/c/d; occasional citation number at a paragraph edge).
