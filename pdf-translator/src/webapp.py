@@ -35,7 +35,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 JOBS_DIR = os.environ.get("PDF_TRANSLATOR_JOBS",
                           os.path.join(ROOT, "analysis", "webjobs"))
 MAX_UPLOAD_MB = int(os.environ.get("PDF_TRANSLATOR_MAX_MB", "50"))
-MAX_PARALLEL = int(os.environ.get("PDF_TRANSLATOR_WORKERS", "2"))
+# Default ONE job at a time: two concurrent dense-PDF jobs on a small host
+# (Render 512MB) exceed the instance memory and trigger an OOM restart.
+# Raise via env only on hosts with more RAM.
+MAX_PARALLEL = int(os.environ.get("PDF_TRANSLATOR_WORKERS", "1"))
 JOB_TTL_H = float(os.environ.get("PDF_TRANSLATOR_JOB_TTL_H", "168"))
 AUTH_TOKEN = os.environ.get("PDF_TRANSLATOR_TOKEN")
 # While a translation is running, ping our own public URL this often so a free
@@ -49,6 +52,23 @@ SELF_URL = (os.environ.get("RENDER_EXTERNAL_URL")
 # not hold a worker slot forever (resource-exhaustion guard).
 JOB_TIMEOUT_SEC = int(float(os.environ.get("PDF_TRANSLATOR_JOB_TIMEOUT_MIN",
                                            "45")) * 60)
+# Hard memory ceiling for the JOB SUBPROCESS (address space, MB). A job that
+# would exceed the host's RAM dies with a clean per-job error instead of
+# taking the whole instance down in an OOM restart. 0 disables.
+JOB_MEM_MB = int(os.environ.get("PDF_TRANSLATOR_JOB_MEM_MB", "380"))
+
+
+def _job_rlimit():
+    """preexec_fn: cap the child's address space so a runaway job cannot OOM
+    the instance."""
+    if JOB_MEM_MB <= 0:
+        return
+    import resource
+    lim = JOB_MEM_MB * 1024 * 1024
+    try:
+        resource.setrlimit(resource.RLIMIT_AS, (lim, lim))
+    except (ValueError, OSError):
+        pass
 # Per-client rate limit on expensive endpoints (jobs/hour). The whole site is
 # already behind the password; this is defense in depth against a leaked
 # credential being used to grind the server.
@@ -253,7 +273,8 @@ def _run_job(job_id):
         job["status"] = "running"
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True, env=env,
-                                cwd=os.path.join(ROOT, "src"))
+                                cwd=os.path.join(ROOT, "src"),
+                                preexec_fn=_job_rlimit)
 
         def _kill():
             killed["v"] = True
@@ -315,6 +336,9 @@ def _run_job(job_id):
         if killed["v"]:
             job["error"] = (f"処理時間の上限({JOB_TIMEOUT_SEC // 60}分)を超えたため"
                             f"中断しました。ページ数の少ないPDFでお試しください。")
+        elif any("MemoryError" in l for l in tail):
+            job["error"] = ("メモリ上限に達したため中断しました。文字数の非常に多い"
+                            "PDFです。ページを分割してお試しください。")
         else:
             # surface the pipeline's own message (e.g. encrypted / scanned PDF)
             err = next((l for l in reversed(tail) if l.startswith("error:")), None)

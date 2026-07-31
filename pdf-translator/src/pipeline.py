@@ -56,7 +56,10 @@ def validate_pdf(pdf_path):
             raise UnsupportedPdfError(
                 f"PDF has {len(pdf.pages)} pages (limit {max_pages}) "
                 f"(ページ数が上限{max_pages}を超えています。分割してお試しください)")
-        nchars = sum(len(p.chars) for p in pdf.pages[:5])
+        nchars = 0
+        for p in pdf.pages[:5]:
+            nchars += len(p.chars)
+            p.flush_cache(); p.get_textmap.cache_clear()   # memory guard
         # Scanned pages WITH an OCR text layer: the visible English is pixels
         # inside a full-page image, which content-stream editing cannot remove -
         # overlaying Japanese would print onto the untouched English image.
@@ -75,6 +78,7 @@ def validate_pdf(pdf_path):
                              and c["bottom"] <= im["bottom"] + 2)
                 if inside >= 0.8 * len(p.chars):
                     scan_pages += 1
+            p.flush_cache(); p.get_textmap.cache_clear()   # memory guard
         if scan_pages >= max(2, 0.5 * len(checked)):
             raise UnsupportedPdfError(
                 "scanned pages with an OCR text layer - the printed English is "

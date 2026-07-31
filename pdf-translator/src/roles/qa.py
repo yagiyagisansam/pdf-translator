@@ -81,6 +81,7 @@ def _jp_on_english_overlaps(path):
     with pdfplumber.open(path) as pdf:
         for pi, page in enumerate(pdf.pages, start=1):
             words = page.extract_words()
+            page.flush_cache(); page.get_textmap.cache_clear()  # memory guard
             jp = [w for w in words if _is_jp(w["text"])]
             # rotated English (chart axis labels) is figure content that stays
             # on the page by design - not residual body text

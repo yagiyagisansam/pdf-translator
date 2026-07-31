@@ -562,12 +562,17 @@ def reading_order(blocks):
         full_by_band.setdefault(band_of(cy), []).append(b)
     nbands = max([0] + list(groups.keys()) + list(full_by_band.keys())) + 1
     for band in range(nbands):
-        for b in sorted(full_by_band.get(band, []), key=lambda b: b["top"]):
-            ordered.append(b)
+        # Band edges are the full-width blocks' own centers, so a full block is
+        # always the TERMINATOR of its band - any column content in the same
+        # band sits physically ABOVE it and must be read (and anchored) FIRST.
+        # Emitting fulls first put a page-bottom footer before the columns,
+        # which anchored the flow below them and overflowed the whole page.
         band_blocks = groups.get(band, [])
         left = sorted([b for b in band_blocks if b["col"] == 1], key=lambda b: b["top"])
         right = sorted([b for b in band_blocks if b["col"] == 2], key=lambda b: b["top"])
         ordered.extend(left); ordered.extend(right)
+        for b in sorted(full_by_band.get(band, []), key=lambda b: b["top"]):
+            ordered.append(b)
     for i, b in enumerate(ordered):
         b["order"] = i + 1
     return ordered
@@ -666,6 +671,13 @@ def analyze_pdf(path, name, render=True):
             "columns": 2 if mid else 1, "body_size": body_size,
             "blocks": ordered, "figures": figs, "rules": rules,
         })
+        # MEMORY: pdfplumber caches every page's parsed objects for the life of
+        # the document - on a dense 200k+ char PDF that alone exceeds a small
+        # host's RAM (Render 512MB OOM). Everything needed is now in `doc`;
+        # release this page's caches before touching the next page.
+        del chars, prelim, body_chars, lines, blocks, ordered
+        page.flush_cache()
+        page.get_textmap.cache_clear()
     pdf.close()
 
     # mark repeated headers/footers (same normalized text in the top OR bottom
