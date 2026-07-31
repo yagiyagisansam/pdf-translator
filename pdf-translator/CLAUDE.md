@@ -20,8 +20,14 @@ the next begins. Communicate in Japanese with the user when summarizing progress
    which is excluded from `TRANSLATABLE`, so they are skipped end to end.)
 5. **No scattered alphabet fragments, no text-on-text / text-on-figure overlap.** These are
    not "minor"; they block acceptance.
-6. **Layout method is "B": keep block positions + auto-shrink/​reflow within each block's
-   collision-free region.** (Not full column reflow.)
+6. **Two placement modes, chosen automatically (editor.build):**
+   - **region** (slides, brochures, posters - any landscape page OR portrait docs whose
+     translatable text is NOT dominated by multi-line paragraphs): every unit is drawn at
+     its SOURCE block's position, at a font size tracking the SOURCE size (a 39pt cover
+     title stays display-size; a 7pt callout label stays small). QA enforces this
+     mechanically (layout_drift / size_fidelity defects).
+   - **reflow** (papers/reports): figures fixed, Japanese reflowed by reading order into
+     the page's column structure.
 
 ## The single biggest gotcha: coordinates
 `pdfplumber` page coordinates and the PDF **content-stream** coordinates do **not** line up
@@ -49,6 +55,22 @@ The original "first tasks" are DONE: paths are de-hardcoded (`src/config.py` + a
 CLIs + `src/pipeline.py` one-command runner) and the M4 suite in `tests/` is wired and
 green (golden layout in `tests/golden/`). Run `python src/pipeline.py paper --engine mock`
 then `python -m pytest tests/` before and after any change.
+
+## Segmentation (M1) - island-safe, rebuilt 2026-07-31
+Line building is 2D (`_char_segments`): a char joins a line segment only with >=55%
+vertical overlap AND bounded horizontal gap; adjacent open segments merge when they
+meet (superscripts/± arrive out of order). Segments split at ALIGNMENT EDGES (a gap
+landing on a left edge shared by >=3 other segments = a neighbouring island starts
+there) - but never right after a list/heading marker ("•", "3."). Blocks are built in
+2D too: vertical adjacency + x-overlap + similar font size (ratio <= 1.25), with a
+tabular-row guard (a row containing multiple segments inside the block's span never
+merges into prose). Rotated (non-upright) text is figure content - excluded entirely.
+Spec-table value cells/columns classify as `data` via unit-token heuristics
+(`_numericish`). These rules killed the brochure failure modes: char interleaving,
+label/paragraph fusion, tables translated as run-on prose, lost display titles.
+M2 additionally refuses to merge blocks that are not geometrically one island on
+landscape pages, and the capital-start continuation heuristic requires real paragraph
+length (>=80 chars), so short labels never chain.
 
 ## Known remaining issues (open work, prioritised in docs/IMPROVEMENT_PLAN.md)
 - A few stray fragments can survive on the title page (author-line superscript affiliation

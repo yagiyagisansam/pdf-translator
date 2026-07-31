@@ -320,21 +320,40 @@ def _font_of(u):
     return "NotoJP-Bold" if u["type"] in ("heading", "title") else "NotoJP"
 
 
+def _is_flowing_doc(layout):
+    """True when the document's translatable text is dominated by flowing
+    multi-line paragraphs (a paper/report) - the only shape column reflow is
+    valid for. Scattered short blocks (brochures, posters, forms) must keep
+    per-block positions instead."""
+    tot = flowing = 0
+    for p in layout["pages"]:
+        for b in p["blocks"]:
+            if b["type"] in TRANS:
+                n = len(b.get("text", ""))
+                tot += n
+                if b.get("nlines", 1) >= 3:
+                    flowing += n
+    return tot > 0 and flowing / tot >= 0.5
+
+
 def build(name, src_path, floor=6.0):
     ensure_out()
     m3._register_fonts()
     layout = json.load(open(f"{OUT}/{name}_layout.json"))
     units = json.load(open(f"{OUT}/{name}_bilingual.json"))
 
-    # Slide decks (any landscape page) don't fit the paper reflow band model -
-    # their text boxes are scattered and each slide is independent. Place each
-    # unit across its own block regions with the proven per-region engine, which
-    # keeps text near its original position and spreads multi-page units onto the
-    # right pages.
-    if any(p["width"] > p["height"] for p in layout["pages"]):
+    # Slide decks (any landscape page) and poster/brochure-style documents don't
+    # fit the paper reflow band model - their text boxes are scattered islands
+    # and each one must stay at its own position. Place each unit across its own
+    # block regions with the per-region engine, which keeps text at its original
+    # position (and, per unit, at its original font size). Reflow is only for
+    # documents whose translatable text is dominated by flowing multi-line
+    # paragraphs (papers, reports).
+    if any(p["width"] > p["height"] for p in layout["pages"]) \
+            or not _is_flowing_doc(layout):
         out_path, stripped = m3.generate(name, src_path)
         placed = json.load(open(f"{OUT}/{name}_placed.json"))
-        return {"out_path": out_path, "stripped": stripped,
+        return {"out_path": out_path, "stripped": stripped, "mode": "region",
                 "pages": len(layout["pages"]), "placed": placed, "overflow": []}
 
     # 1) strip original translatable text (font-decoded, content-based)
@@ -427,7 +446,7 @@ def build(name, src_path, floor=6.0):
     out_path = f"{OUT}/{name}_ja.pdf"
     with open(out_path, "wb") as f:
         w.write(f)
-    return {"out_path": out_path, "stripped": stripped,
+    return {"out_path": out_path, "stripped": stripped, "mode": "reflow",
             "pages": len(layout["pages"]), "placed": placed,
             "overflow": [("total", overflow)] if overflow else []}
 
