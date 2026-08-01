@@ -234,9 +234,12 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
         right = min(page["width"] * 0.97,
                     max((b["x1"] for b in page["blocks"]), default=x1) + 4)
         for b in page["blocks"]:
-            if b["x0"] >= x1 - 1 and b.get("text", "").strip() and \
+            # clamp at ANY row-mate starting right of the label's own start -
+            # value cells can slightly overlap the label's bbox ("June 27,
+            # 2025" under a wide header cell) and must still bound the cell
+            if b["x0"] > x0 + 1 and b.get("text", "").strip() and \
                     not (b["bottom"] <= u["_top"] + 1 or b["top"] >= bottom_est):
-                right = min(right, b["x0"] - 3)
+                right = min(right, max(b["x0"] - 3, x0 + 12))
         for f in page.get("figures", []):
             if f["x0"] >= x1 - 1 and \
                     not (f["bottom"] <= u["_top"] + 1 or f["top"] >= bottom_est):

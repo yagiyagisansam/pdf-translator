@@ -303,6 +303,12 @@ class GoogleFreeTranslator(Translator):
                                   for c in self._split(text))
                 except Exception:
                     return ""  # unit falls back to English (safe default)
+            # Google formats the token's digits as a NUMBER sometimes -
+            # "⟦T12⟧" comes back "⟦T1,2⟧" / "⟦T 12⟧". Normalize the inside
+            # of every bracket pair back to ⟦T<digits>⟧ before validation.
+            out = re.sub(r"⟦\s*[TＴ]\s*([\d][\d,.\s]*)\s*⟧",
+                         lambda m: "⟦T" + re.sub(r"\D", "", m.group(1)) + "⟧",
+                         out)
             return re.sub(r"\s*(⟦T\d+⟧)\s*", r"\1", out)
 
         return _map_concurrent(one, items, self.max_workers)

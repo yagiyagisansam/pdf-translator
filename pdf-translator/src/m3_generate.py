@@ -649,9 +649,9 @@ def generate(name, src_path):
             for ob in blocks_all:
                 if id(ob) in own or not ob.get("text", "").strip():
                     continue
-                if ob["x0"] >= x1 - 1 and \
+                if ob["x0"] > x0 + 1 and \
                         not (ob["bottom"] <= top + 1 or ob["top"] >= bottom - 1):
-                    lim = min(lim, ob["x0"] - 3)
+                    lim = min(lim, max(ob["x0"] - 3, x0 + 12))
             for f in figs:
                 if f["x0"] >= x1 - 1 and \
                         not (f["bottom"] <= top + 1 or f["top"] >= bottom - 1):
