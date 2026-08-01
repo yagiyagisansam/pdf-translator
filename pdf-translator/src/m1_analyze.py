@@ -674,6 +674,19 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                     return True
         return False
 
+    # x0 histogram of SHORT NUMERIC lines: >=3 sharing a left edge form a
+    # page-number/value COLUMN (a leaderless TOC, a spec table). Rows facing
+    # such a column seal regardless of the normal gap cap - a short title
+    # sits far from the number column, but the row is still one record.
+    from collections import Counter as _Ctr
+    _num_x0 = _Ctr(round(m["x0"]) for m in lines
+                   if _numericish(m["text"]) and len(m["text"].strip()) <= 8)
+
+    def _in_num_col(m):
+        return _numericish(m["text"]) and len(m["text"].strip()) <= 8 and \
+            sum(v for k, v in _num_x0.items()
+                if abs(k - round(m["x0"])) <= 2) >= 3
+
     def _is_record_row(l):
         """A line with a NEARBY row-mate that is NUMERIC (a TOC row next to its
         page number, a spec label next to its value) or that shares a RULED
@@ -690,6 +703,16 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             if ov < 0.5 * min(lh, (m["bottom"] - m["top"]) or 1.0):
                 continue
             gap = max(m["x0"] - l["x1"], l["x0"] - m["x1"], 0.0)
+            # a row-mate in an ALIGNED numeric column (or this numeric line's
+            # own text mate) seals the row even across a wide gap - and the
+            # NUMBER lines themselves must seal too, or consecutive numbers
+            # fuse into one block ("12 16") and the rows above lose their
+            # mates entirely
+            if gap <= 0.9 * page_text_w:
+                if _in_num_col(m) and not _numericish(l["text"]):
+                    return "cell"
+                if _in_num_col(l) and not _numericish(m["text"]):
+                    return "cell"
             # financial tables put a wide gutter between the label column and
             # its value columns ("EMEA ......... $ 3,240"); 15% missed them and
             # the label rows chained into one run-on block. A numeric row-mate
