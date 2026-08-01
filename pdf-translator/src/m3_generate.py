@@ -461,7 +461,8 @@ def _wrap(text, font, size, max_w):
     return lines
 
 def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
-                              src_size=0.0, uid=None, src_lines=0, color=None):
+                              src_size=0.0, uid=None, src_lines=0, color=None,
+                              one_line=False):
     """Flow `text` across the unit's regions (in reading order). Pick the largest
     font (capped) such that all wrapped lines fit within the total region capacity,
     then lay lines into region 1, overflow into region 2, etc. Line slots skip
@@ -486,15 +487,20 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
         """y positions where a line of this size can be drawn: a fixed grid from
         the region top, minus slots that intersect an obstacle band. A TALL
         obstacle (a photo/figure) ENDS the region: text must never jump across
-        it and reappear somewhere visually unrelated below."""
+        it and reappear somewhere visually unrelated below.
+
+        Collision uses the GLYPH box (~the font size), not the leading box
+        (1.16x): the extra 16% is empty inter-line space, and counting it let a
+        source-size line 'collide' with a boundary its glyphs never touch."""
         lh = size * 1.16
+        he = size * 1.02          # visible glyph height for collision tests
         obstacles = rb.get("obstacles", ())
         big = max(3.0 * lh, 30.0)
         slots = []
         y = rb["top"]
-        while y + lh <= rb["avail_bottom"] + 0.1:
+        while y + he <= rb["avail_bottom"] + 0.1:
             hit = next(((ot, ob) for (ot, ob) in obstacles
-                        if y < ob and y + lh > ot), None)
+                        if y < ob and y + he > ot), None)
             if hit is None:
                 slots.append(y)
                 y += lh
@@ -528,8 +534,10 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
     # Display text (title/heading) keeps its source LINE COUNT: "AW101" set as a
     # one-line 39pt cover title must stay one line - shrink slightly rather than
     # wrap ("AW10 / 1"). Only for single-region display units; body paragraphs
-    # may legitimately need more lines in Japanese.
-    if src_lines and len(regs) == 1 and btype in ("title", "heading"):
+    # may legitimately need more lines in Japanese. Sealed RECORD rows (table
+    # cells) are one-liners too: wrapping shifts every row below them.
+    if src_lines and len(regs) == 1 and \
+            (btype in ("title", "heading") or one_line):
         w = max(10, regs[0][1]["x1"] - regs[0][1]["x0"])
         while size > FLOOR and len(_wrap(text, font, size, w)) > src_lines:
             size -= 0.25
@@ -600,6 +608,23 @@ def generate(name, src_path):
         top = min(b["top"] for b in blocks_in_region)
         bottom = max(b["bottom"] for b in blocks_in_region)
         own = set(id(b) for b in blocks_in_region)
+        # a sealed RECORD row (table label cell, TOC row): extend the cell to
+        # just before the nearest element on the right in the same row, so a
+        # Japanese label slightly wider than the English does not wrap
+        # ("ラテンアメリ/カ") and break the row alignment
+        if len(blocks_in_region) == 1 and blocks_in_region[0].get("record"):
+            lim = layout["pages"][pi]["width"] * 0.97
+            for ob in blocks_all:
+                if id(ob) in own or not ob.get("text", "").strip():
+                    continue
+                if ob["x0"] >= x1 - 1 and \
+                        not (ob["bottom"] <= top + 1 or ob["top"] >= bottom - 1):
+                    lim = min(lim, ob["x0"] - 3)
+            for f in figs:
+                if f["x0"] >= x1 - 1 and \
+                        not (f["bottom"] <= top + 1 or f["top"] >= bottom - 1):
+                    lim = min(lim, f["x0"] - 2)
+            x1 = max(x1, min(lim, x1 + (x1 - x0) * 2.0 + 24.0))
         # Headings/titles have tight English boxes; a Japanese heading can be wider.
         # Extend the usable width rightward to the right edge of body text in the
         # same column so the heading renders on one line instead of wrapping & clipping.
@@ -640,6 +665,11 @@ def generate(name, src_path):
             if ov_y <= 1.0:
                 continue    # near-miss adjacency is NOT an overlap: pushing on
                             # a 2pt graze cascaded the region below its source
+            if top < f["top"] - 2:
+                continue    # the block STARTS above the figure and merely
+                            # grazes its top edge with a descender - pushing it
+                            # BELOW the whole figure would move it far from its
+                            # designed position for a cosmetic 8pt touch
             clear = CAP_CLEAR if btype == "caption" else FIG_MARGIN
             fb = f["bottom"] + clear
             if top < fb and fb < bottom + 80:
@@ -664,7 +694,8 @@ def generate(name, src_path):
                 avail_bottom = min(avail_bottom, f["top"] - FIG_MARGIN)
         avail_bottom = max(bottom, avail_bottom - 2.0)
         return {"x0": x0, "x1": x1, "top": top, "avail_bottom": avail_bottom,
-                "own": own, "page": pi, "obstacles": [], "on_figs": on_figs}
+                "own": own, "page": pi, "obstacles": [], "on_figs": on_figs,
+                "src_bottom": bottom}
 
     # Per page, the concatenated normalized text of all TRANSLATED blocks.
     # The content-based kill removes any text-show op whose text is part of this blob.
@@ -772,8 +803,20 @@ def generate(name, src_path):
                     bands.append((r["top"] - 2.0, r["bottom"] + 2.0))
             # keep only bands that actually cut into this region's slot range,
             # and never let a band that covers the region's own start erase the
-            # whole region (mutually-overlapping source boxes would deadlock)
-            rb["obstacles"] = [(t, b) for (t, b) in bands
+            # whole region (mutually-overlapping source boxes would deadlock).
+            # A band that only GRAZES the bottom of the unit's source box (an
+            # image whose top edge the source text descends onto by a few pt)
+            # is clipped to start below the source box: the source already
+            # coexisted with it, so the slots inside the box stay usable -
+            # without this an 8pt graze squeezed a 44pt title to 24pt.
+            src_bot = rb.get("src_bottom", rb["avail_bottom"])
+            src_h = max(src_bot - rb["top"], 1.0)
+            adj = []
+            for (t, b) in bands:
+                if t < src_bot and b > src_bot and src_bot - t <= 0.5 * src_h:
+                    t = src_bot + 0.5
+                adj.append((t, b))
+            rb["obstacles"] = [(t, b) for (t, b) in adj
                                if b > rb["top"] + 1.0 and t < rb["avail_bottom"] - 1.0
                                and t > rb["top"] + 1.0]
 
@@ -815,9 +858,13 @@ def generate(name, src_path):
         src_size=_st.median(sizes) if sizes else 0.0
         from collections import Counter as _Ct
         color=list(_Ct(colors).most_common(1)[0][0]) if colors else None
+        rec_one = nlines == 1 and len(u["spans"]) == 1 and \
+            layout["pages"][int(u["spans"][0].split(":")[0])]["blocks"][
+                int(u["spans"][0].split(":")[1])].get("record")
         _flow_unit_across_regions(u["target"], u["type"], regs, layout,
                                   per_page_draws, src_size=src_size, uid=uid,
-                                  src_lines=nlines, color=color)
+                                  src_lines=nlines, color=color,
+                                  one_line=bool(rec_one))
 
     # Persist the actually-drawn line boxes so M4 can verify text/figure overlap
     # on real placement data instead of the pre-layout block bboxes.

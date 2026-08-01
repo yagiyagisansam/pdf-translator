@@ -149,6 +149,34 @@ def run(name: str, engine: str = "mock"):
                 redo = _safe_batch(retry, [items[i] for i in bad])
                 for i, r in zip(bad, redo):
                     results[i] = r
+            # PARTIAL-UNMASK repair: when the engine DROPPED a few specific
+            # tokens (kept the rest), inline just those tokens' literal values
+            # into the masked source and retranslate. The surviving tokens stay
+            # protected; the inlined values are numeric literals whose digits
+            # we can verify - far better than dumping the whole paragraph back
+            # to English because one ⟦Tn⟧ went missing.
+            tok_re = re.compile(r"⟦T\d+⟧")
+            for i in list(miss):
+                out = results[i]
+                if not out or _placeholders_ok(items[i]["text"], out):
+                    continue
+                need = set(tok_re.findall(items[i]["text"]))
+                got = set(tok_re.findall(out))
+                missing, extra = need - got, got - need
+                if not missing or extra or len(missing) > 4:
+                    continue
+                txt = items[i]["text"]
+                vals = []
+                for k in sorted(missing):
+                    v = units[i]["tokens"].get(k, "")
+                    txt = txt.replace(k, v)
+                    vals.append(v)
+                out2 = _safe_batch(translator.translate_batch,
+                                   [{"text": txt, "kind": items[i]["kind"]}])[0]
+                if out2 and _placeholders_ok(txt, out2) and _digits_ok(vals, out2):
+                    results[i] = out2
+                    print(f"[{name}] unit {units[i]['uid']}: repaired by inlining "
+                          f"{len(vals)} dropped token(s)", file=sys.stderr)
             still = [i for i in miss
                      if results[i] and not _placeholders_ok(items[i]["text"], results[i])]
             for i in still:
