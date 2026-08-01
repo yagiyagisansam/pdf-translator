@@ -578,6 +578,13 @@ def build(name, src_path, floor=6.0):
                 kill[pi] += m3._norm_txt(b["text"])
                 kill_drop[pi] += m3._norm_txt_drop(b["text"])
                 covered.append(b)
+            elif b["type"] in TRANS and re.search(r"[A-Za-z]", b["text"]):
+                # translatable but NOT covered by a translated unit: its English
+                # stays on the page, so mark it so the reflow treats it as an
+                # obstacle and never draws Japanese over it. (No-letter blocks -
+                # bare bullet markers, symbols - are NOT obstacles: a "•" must
+                # not cut a whole flow lane in half at its y.)
+                b["_keep_en"] = True
         # ROW-MAJOR blob: the content stream often draws one op per VISUAL ROW
         # across parallel columns ("afterglow forget-me-not right-of-way"),
         # while the blob above is column-major - the op can only match a blob
@@ -586,13 +593,6 @@ def build(name, src_path, floor=6.0):
         rows = sorted(covered, key=lambda b: (round(b["top"] / 4.0), b["x0"]))
         kill[pi] += "|" + "".join(m3._norm_txt(b["text"]) for b in rows)
         kill_drop[pi] += "|" + "".join(m3._norm_txt_drop(b["text"]) for b in rows)
-            elif b["type"] in TRANS and re.search(r"[A-Za-z]", b["text"]):
-                # translatable but NOT covered by a translated unit: its English
-                # stays on the page, so mark it so the reflow treats it as an
-                # obstacle and never draws Japanese over it. (No-letter blocks -
-                # bare bullet markers, symbols - are NOT obstacles: a "•" must
-                # not cut a whole flow lane in half at its y.)
-                b["_keep_en"] = True
     pdf = Pdf.open(src_path)
     for pi, page in enumerate(pdf.pages):
         if kill.get(pi):

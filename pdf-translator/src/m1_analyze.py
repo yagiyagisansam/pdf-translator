@@ -83,8 +83,13 @@ def _char_segments(chars, gutter=None):
                 continue
             # split at the column gutter, but only when the gap there is clearly
             # wider than a word space - a full-width title/abstract line crosses
-            # the gutter with normal spacing and must stay whole
-            if gutter is not None and gap > 2.0 * s["cw"] and (
+            # the gutter with normal spacing and must stay whole. The word-space
+            # yardstick is the SMALLER char width of the two sides: a large-font
+            # heading on the other side of the gutter otherwise inflates it
+            # until a real column gap reads as a word space (and the columns
+            # merge and interleave).
+            if gutter is not None and \
+                    gap > 2.0 * min(s["cw"], (c["x1"] - c["x0"]) or s["cw"]) and (
                     (s["x1"] <= gutter <= c["x0"]) or (c["x1"] <= gutter <= s["x0"])):
                 continue
             score = (ov / min(ch_h, s["h"]), -gap)
@@ -120,7 +125,7 @@ def _char_segments(chars, gutter=None):
                     if gap > min(max(3.2 * max(s["cw"], o["cw"]),
                                      1.6 * max(s["h"], o["h"])), 30.0):
                         continue
-                    if gutter is not None and gap > 2.0 * max(s["cw"], o["cw"]) and (
+                    if gutter is not None and gap > 2.0 * min(s["cw"], o["cw"]) and (
                             (s["x1"] <= gutter <= o["x0"]) or (o["x1"] <= gutter <= s["x0"])):
                         continue
                     s["chars"] += o["chars"]
