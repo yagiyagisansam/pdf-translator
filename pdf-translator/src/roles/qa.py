@@ -179,6 +179,18 @@ def review(name, editor_report):
     # low to reflow) are by-design English - not residual-strip defects
     ref_pages |= set(editor_report.get("skip_pages") or [])
     blob = _allowed_latin_blob(units, layout)
+    # ROTATED text (chart axis labels, table headers set at 90°) is excluded
+    # from translation BY DESIGN - M1 drops non-upright chars, so it appears
+    # in no block and no unit - it stays on the page and is not residual
+    try:
+        import pdfplumber
+        with pdfplumber.open(out_path) as _pdf:
+            for _pg in _pdf.pages:
+                blob += _norm("".join(c["text"] for c in _pg.chars
+                                      if not c.get("upright", True)))
+                _pg.flush_cache(); _pg.get_textmap.cache_clear()
+    except Exception:
+        pass
     residual = []
     for i, txt in enumerate(_pdf_pages(out_path), start=1):
         if i in ref_pages:

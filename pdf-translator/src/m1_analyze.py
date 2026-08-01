@@ -517,7 +517,9 @@ def _is_contact_line(text):
             if len([w for w in rest.split() if re.search(r"[A-Za-z]", w)]) <= 3:
                 return True
     return False
-REF_RE = re.compile(r"^\d+\.\s+[A-Z][a-z]+")  # ref list "1. Sheppard JM..."
+# ref list entries: "1. Sheppard JM..." (numbered) or "[22] Federal..."
+# (AIAA bracket style) - both gated behind an explicit References heading
+REF_RE = re.compile(r"^(?:\d+\.\s+|\[\d+\]\s*)[A-Z][A-Za-z]+")
 
 def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
     t = b["text"]

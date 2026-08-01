@@ -357,6 +357,15 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                              blob_drop, _norm_txt_drop(t),
                              blob_nodigit=blob_nodigit):
                 dropped[i]=True
+            # a PURE LIGATURE op ('ﬂ' of "...triﬂuoro..." drawn as its own
+            # op) normalizes to 2 chars - under the >=3 guard - and survives
+            # as a stray fragment over the Japanese. The raw glyph being an
+            # actual ligature codepoint distinguishes it from a kept ASCII
+            # cell like "FL": kill it when its expansion is in the blob.
+            elif t and t.strip() and \
+                    all(ch in "ﬁﬂﬀﬃﬄ" for ch in t.strip()) and \
+                    _norm_txt(t) and _norm_txt(t) in kill_blob:
+                dropped[i]=True
     text_idx=[i for i in range(len(ops)) if is_text[i]]
     pos={idx:k for k,idx in enumerate(text_idx)}
 
