@@ -293,7 +293,22 @@ class GoogleFreeTranslator(Translator):
             try:
                 out = "".join((gt.translate(c) or "").strip() for c in self._split(text))
             except Exception:
-                return ""  # unit falls back to English (safe default)
+                # throttled/reset: back off once and retry with a fresh session
+                # before giving up - the public endpoint recovers in seconds,
+                # and an English paragraph left behind is the worst outcome
+                time.sleep(2.0)
+                try:
+                    gt2 = GoogleTranslator(source="en", target="ja")
+                    out = "".join((gt2.translate(c) or "").strip()
+                                  for c in self._split(text))
+                except Exception:
+                    return ""  # unit falls back to English (safe default)
+            # Google formats the token's digits as a NUMBER sometimes -
+            # "⟦T12⟧" comes back "⟦T1,2⟧" / "⟦T 12⟧". Normalize the inside
+            # of every bracket pair back to ⟦T<digits>⟧ before validation.
+            out = re.sub(r"⟦\s*[TＴ]\s*([\d][\d,.\s]*)\s*⟧",
+                         lambda m: "⟦T" + re.sub(r"\D", "", m.group(1)) + "⟧",
+                         out)
             return re.sub(r"\s*(⟦T\d+⟧)\s*", r"\1", out)
 
         return _map_concurrent(one, items, self.max_workers)

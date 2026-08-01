@@ -218,9 +218,48 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
     so two captions can never overlap. Returns draws."""
     x0, x1 = u["_x0"], u["_x1"]
     size = _unit_size(u, factor)
-    lh = size * LR
     font = font_of(u)
     color = tuple(u.get("_color") or (0, 0, 0))
+    if u.get("_record") and u.get("_nlines", 1) <= 3:
+        # A sealed table/TOC row: its Japanese belongs EXACTLY at the source
+        # row. Flowing it around obstacle bands (the kept value columns, the
+        # table rules) pushed headers out of their cells and below the table.
+        # Extend the cell to the nearest element on the right (a Japanese
+        # label is often wider than the English - "ラテンアメリカ" must not
+        # wrap and shift every row below it), shrink to ONE line, and draw at
+        # the source y.
+        bottom_est = u["_top"] + max(size, u.get("_size") or size) * 1.25
+        # never extend past the page's own text band - a cell stretched to the
+        # page margin draws lines QA rightly flags as outside the source band
+        right = min(page["width"] * 0.97,
+                    max((b["x1"] for b in page["blocks"]), default=x1) + 4)
+        for b in page["blocks"]:
+            # clamp at ANY row-mate starting right of the label's own start -
+            # value cells can slightly overlap the label's bbox ("June 27,
+            # 2025" under a wide header cell) and must still bound the cell
+            if b["x0"] > x0 + 1 and b.get("text", "").strip() and \
+                    not (b["bottom"] <= u["_top"] + 1 or b["top"] >= bottom_est):
+                right = min(right, max(b["x0"] - 3, x0 + 12))
+        for f in page.get("figures", []):
+            if f["x0"] >= x1 - 1 and \
+                    not (f["bottom"] <= u["_top"] + 1 or f["top"] >= bottom_est):
+                right = min(right, f["x0"] - 2)
+        width = max(12.0, right - x0)
+        max_lines = max(1, u.get("_nlines", 1))
+        while size > 4.5 and \
+                len(m3._wrap(u["target"], font, size, width)) > max_lines:
+            size -= 0.25
+        lines = m3._wrap(u["target"], font, size, width)
+        draws = []
+        y = u["_top"]
+        for ln in lines:
+            draws.append({"x": x0, "y_top": y, "size": size, "font": font,
+                          "line": ln, "width": width, "justify": False,
+                          "color": color})
+            y += size * LR
+        taken.append((x0, x0 + width, u["_top"] - 1, y + 1))
+        return draws
+    lh = size * LR
     bands = list(_obstacles_for(page, x0, x1))
     for (tx0, tx1, tt, tb) in taken:
         if not (tx1 <= x0 or tx0 >= x1):
@@ -422,6 +461,7 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
             frag["_top"] = blk.get("top", 0.0)
             frag["_color"] = blk.get("color")
             frag["_record"] = bool(blk.get("record"))
+            frag["_nlines"] = blk.get("nlines", 1)
             frag["_size"] = _st.median(bs) if bs else \
                 (layout["pages"][fpi].get("body_size") or 10)
             frag["_x0"] = blk.get("x0", 0.0)
@@ -566,14 +606,20 @@ def build(name, src_path, floor=6.0):
             for d in draws]
     json.dump(placed, open(f"{OUT}/{name}_placed.json", "w"))
 
-    # 3) overlay + merge
+    # 3) overlay + merge (canvas in DISPLAY space; _merge_overlay compensates
+    # for /Rotate pages)
     rd = PdfReader(src_path)
-    sizes = [(float(p.mediabox.width), float(p.mediabox.height),
-              float(p.mediabox.left), float(p.mediabox.bottom)) for p in rd.pages]
+    sizes = []
+    for pi2, p in enumerate(rd.pages):
+        lp = layout["pages"][pi2] if pi2 < len(layout["pages"]) else None
+        if lp:
+            sizes.append((float(lp["width"]), float(lp["height"])))
+        else:
+            sizes.append((float(p.mediabox.width), float(p.mediabox.height)))
     overlay = f"{OUT}/{name}_overlay.pdf"
     c = None
     for pi in range(len(sizes)):
-        pw, ph, xo, yo = sizes[pi]
+        pw, ph = sizes[pi]
         c = canvas.Canvas(overlay, pagesize=(pw, ph)) if c is None else c
         if pi:
             c.setPageSize((pw, ph))
@@ -596,7 +642,7 @@ def build(name, src_path, floor=6.0):
     over = PdfReader(overlay); w = PdfWriter(); w.append(PdfReader(stripped))
     for i, page in enumerate(w.pages):
         if i < len(over.pages):
-            page.merge_page(over.pages[i])
+            m3._merge_overlay(page, over.pages[i])
     out_path = f"{OUT}/{name}_ja.pdf"
     with open(out_path, "wb") as f:
         w.write(f)
