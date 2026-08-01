@@ -220,7 +220,7 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
     size = _unit_size(u, factor)
     font = font_of(u)
     color = tuple(u.get("_color") or (0, 0, 0))
-    if u.get("_record") and u.get("_nlines", 1) == 1:
+    if u.get("_record") and u.get("_nlines", 1) <= 3:
         # A sealed table/TOC row: its Japanese belongs EXACTLY at the source
         # row. Flowing it around obstacle bands (the kept value columns, the
         # table rules) pushed headers out of their cells and below the table.
@@ -245,7 +245,9 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
                     not (f["bottom"] <= u["_top"] + 1 or f["top"] >= bottom_est):
                 right = min(right, f["x0"] - 2)
         width = max(12.0, right - x0)
-        while size > 4.5 and len(m3._wrap(u["target"], font, size, width)) > 1:
+        max_lines = max(1, u.get("_nlines", 1))
+        while size > 4.5 and \
+                len(m3._wrap(u["target"], font, size, width)) > max_lines:
             size -= 0.25
         lines = m3._wrap(u["target"], font, size, width)
         draws = []

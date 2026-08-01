@@ -581,8 +581,46 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             b["top"] = min(b["top"], l["top"]); b["bottom"] = max(b["bottom"], l["bottom"])
             b["size_med"] = statistics.median(
                 [x["size"] for x in b["lines"] if x["size"]] or [0])
+    # STACKED CELL MERGE: a table header cell often holds 2-3 stacked short
+    # lines ("Reported" / "Operating" / "Income"). Each line got sealed as its
+    # own record row (the header underline rule spans the row), which made
+    # three one-line cells whose translations wrap chaotically. Vertically
+    # adjacent record rows that share their x-range are ONE cell.
+    recs = [b for b in done + open_blocks if b.get("record")]
+    recs.sort(key=lambda b: (b["x0"], b["top"]))
+    merged_away = set()
+    for a in recs:
+        if id(a) in merged_away:
+            continue
+        changed = True
+        while changed:
+            changed = False
+            for c in recs:
+                if c is a or id(c) in merged_away or id(a) in merged_away:
+                    continue
+                ov = min(a["x1"], c["x1"]) - max(a["x0"], c["x0"])
+                wmin = min(a["x1"] - a["x0"], c["x1"] - c["x0"]) or 1.0
+                wmax = max(a["x1"] - a["x0"], c["x1"] - c["x0"])
+                lh = max((x["bottom"] - x["top"]) for x in c["lines"])
+                gap = max(c["top"] - a["bottom"], a["top"] - c["bottom"])
+                s1 = a["size_med"] or 1.0
+                s2 = c["size_med"] or 1.0
+                # ONLY tight in-cell stacks: separate table/TOC rows have a
+                # visible row gap (>=~0.5 line height) and are usually wide -
+                # merging them would undo the row sealing entirely
+                if ov >= 0.7 * wmin and gap <= 0.4 * lh and \
+                        wmax <= 0.3 * page_text_w and \
+                        max(s1, s2) / max(0.1, min(s1, s2)) <= 1.25:
+                    a["lines"] += c["lines"]
+                    a["x0"] = min(a["x0"], c["x0"]); a["x1"] = max(a["x1"], c["x1"])
+                    a["top"] = min(a["top"], c["top"])
+                    a["bottom"] = max(a["bottom"], c["bottom"])
+                    merged_away.add(id(c))
+                    changed = True
     blocks = []
     for b in done + open_blocks:
+        if id(b) in merged_away:
+            continue
         blk = _mkblock(b["lines"], 0)
         blk["col"] = assign_column(blk, mid, left, right)
         if b.get("record"):

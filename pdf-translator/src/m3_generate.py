@@ -890,7 +890,7 @@ def generate(name, src_path):
         src_size=_st.median(sizes) if sizes else 0.0
         from collections import Counter as _Ct
         color=list(_Ct(colors).most_common(1)[0][0]) if colors else None
-        rec_one = nlines == 1 and len(u["spans"]) == 1 and \
+        rec_one = nlines <= 3 and len(u["spans"]) == 1 and \
             layout["pages"][int(u["spans"][0].split(":")[0])]["blocks"][
                 int(u["spans"][0].split(":")[1])].get("record")
         # short single-line labels ("Package 3: NDED VCIC" on a slide) also
