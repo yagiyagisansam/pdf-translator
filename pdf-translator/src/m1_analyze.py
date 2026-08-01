@@ -487,7 +487,12 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             if ov < 0.5 * min(lh, (m["bottom"] - m["top"]) or 1.0):
                 continue
             gap = max(m["x0"] - l["x1"], l["x0"] - m["x1"], 0.0)
-            if gap > 0.15 * page_text_w:
+            # financial tables put a wide gutter between the label column and
+            # its value columns ("EMEA ......... $ 3,240"); 15% missed them and
+            # the label rows chained into one run-on block. A numeric row-mate
+            # anywhere in the same visual row seals the line; a false seal on
+            # prose is harmless (M2 re-merges it into the paragraph unit).
+            if gap > 0.45 * page_text_w:
                 continue
             if _numericish(m["text"]) or _row_rule_spans(l, m):
                 return True

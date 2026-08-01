@@ -293,7 +293,16 @@ class GoogleFreeTranslator(Translator):
             try:
                 out = "".join((gt.translate(c) or "").strip() for c in self._split(text))
             except Exception:
-                return ""  # unit falls back to English (safe default)
+                # throttled/reset: back off once and retry with a fresh session
+                # before giving up - the public endpoint recovers in seconds,
+                # and an English paragraph left behind is the worst outcome
+                time.sleep(2.0)
+                try:
+                    gt2 = GoogleTranslator(source="en", target="ja")
+                    out = "".join((gt2.translate(c) or "").strip()
+                                  for c in self._split(text))
+                except Exception:
+                    return ""  # unit falls back to English (safe default)
             return re.sub(r"\s*(⟦T\d+⟧)\s*", r"\1", out)
 
         return _map_concurrent(one, items, self.max_workers)

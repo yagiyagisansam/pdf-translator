@@ -404,7 +404,8 @@ def sanitize_targets(units):
 
 
 # chars that must not START a line (行頭禁則) - hung on the previous line instead
-_KINSOKU_HEAD = set("、。，．・：；)]｝」』〕）〉》！？!?,.;:%％…‥ー々")
+_KINSOKU_HEAD = set("、。，．・：；)]｝」』〕）〉》！？!?,.;:%％…‥ー々"
+                    "ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ")
 
 
 def _ascii_wordish(ch):
@@ -790,10 +791,17 @@ def generate(name, src_path):
     overlay=f"{OUT}/{name}_overlay.pdf"
     rd=PdfReader(src_path)
     npages=len(rd.pages)
+    # The overlay canvas lives in DISPLAY space (pdfplumber's rotated view, the
+    # same space every draw coordinate is in). For /Rotate 0 pages display ==
+    # mediabox; for rotated pages the merge step compensates (see _merge_overlay).
     page_sizes=[]
-    for page in rd.pages:
-        mb=page.mediabox
-        page_sizes.append((float(mb.width),float(mb.height),float(mb.left),float(mb.bottom)))
+    for pi2, page in enumerate(rd.pages):
+        lp = layout["pages"][pi2] if pi2 < len(layout["pages"]) else None
+        if lp:
+            page_sizes.append((float(lp["width"]), float(lp["height"])))
+        else:
+            mb = page.mediabox
+            page_sizes.append((float(mb.width), float(mb.height)))
     per_page_draws={pi:[] for pi in range(npages)}
     import statistics as _st
     for uid,(u,regs) in unit_regions.items():
@@ -826,7 +834,7 @@ def generate(name, src_path):
         json.dump(placed, f)
     c=None
     for pi in range(npages):
-        pw,ph,xo,yo=page_sizes[pi]
+        pw,ph=page_sizes[pi]
         if c is None: c=canvas.Canvas(overlay,pagesize=(pw,ph))
         else: c.setPageSize((pw,ph))
         # The overlay merges into the page's ABSOLUTE space, and pdfplumber x/y are
@@ -849,10 +857,30 @@ def generate(name, src_path):
     over=PdfReader(overlay); w=PdfWriter()
     w.append(PdfReader(stripped))
     for i,page in enumerate(w.pages):
-        if i<len(over.pages): page.merge_page(over.pages[i])
+        if i<len(over.pages): _merge_overlay(page, over.pages[i])
     out_path=f"{OUT}/{name}_ja.pdf"
     with open(out_path,"wb") as f: w.write(f)
     return out_path, stripped
+
+
+def _merge_overlay(dst_page, ov_page):
+    """Merge an overlay drawn in DISPLAY space onto a page, compensating for
+    the page's /Rotate. Without this, Japanese on a /Rotate 90 deck (portrait
+    mediabox displayed landscape) rendered rotated 90° and ran off the page."""
+    rot = (dst_page.get("/Rotate") or 0) % 360
+    if rot == 0:
+        dst_page.merge_page(ov_page)
+        return
+    from pypdf import Transformation
+    mb = dst_page.mediabox
+    w0, h0 = float(mb.width), float(mb.height)
+    if rot == 90:
+        t = Transformation().rotate(90).translate(tx=w0, ty=0)
+    elif rot == 270:
+        t = Transformation().rotate(-90).translate(tx=0, ty=h0)
+    else:                                   # 180
+        t = Transformation().rotate(180).translate(tx=w0, ty=h0)
+    dst_page.merge_transformed_page(ov_page, t)
 
 if __name__=="__main__":
     import argparse

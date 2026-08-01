@@ -65,6 +65,7 @@ def validate_pdf(pdf_path):
         # overlaying Japanese would print onto the untouched English image.
         # Detect (full-page image + all text inside it) and refuse honestly.
         scan_pages = 0
+        suspects = []
         checked = pdf.pages[:20]
         for p in checked:
             pa = (p.width or 1) * (p.height or 1)
@@ -78,17 +79,75 @@ def validate_pdf(pdf_path):
                              and c["bottom"] <= im["bottom"] + 2)
                 if inside >= 0.8 * len(p.chars):
                     scan_pages += 1
+                    suspects.append(p.page_number - 1)
             p.flush_cache(); p.get_textmap.cache_clear()   # memory guard
         if scan_pages >= max(2, 0.5 * len(checked)):
-            raise UnsupportedPdfError(
-                "scanned pages with an OCR text layer - the printed English is "
-                "part of the page image and cannot be replaced "
-                "(スキャン画像の上にOCRテキスト層が乗ったPDFは、画像内の英語を消せない"
-                "ため未対応です。元データのPDFでお試しください)")
+            # The geometry alone (full-bleed image + text inside it) also matches
+            # a perfectly good DIGITAL slide deck whose slides use a full-page
+            # background photo. Decide by what actually matters: strip the text
+            # and re-render - if the page CHANGES, the text is real visible text
+            # (translatable); only an invisible OCR layer leaves pixels untouched.
+            if not _text_visibly_renders(pdf_path, suspects[:3]):
+                raise UnsupportedPdfError(
+                    "scanned pages with an OCR text layer - the printed English is "
+                    "part of the page image and cannot be replaced "
+                    "(スキャン画像の上にOCRテキスト層が乗ったPDFは、画像内の英語を消せない"
+                    "ため未対応です。元データのPDFでお試しください)")
     if nchars < 50:
         raise UnsupportedPdfError(
             "no extractable text layer - scanned/image-only PDFs need OCR first "
             "(テキスト層がないスキャンPDFは未対応です。先にOCRをかけてください)")
+
+
+def _text_visibly_renders(pdf_path, page_indices):
+    """True when stripping the text layer visibly changes at least one of the
+    given pages. Distinguishes a digital deck (full-bleed background photo +
+    REAL text = translatable) from a scan with an invisible OCR layer (pixels
+    identical after the strip = nothing we can edit)."""
+    if not page_indices:
+        return False
+    import tempfile
+    import pdfplumber
+    import pikepdf
+    import pypdfium2 as pdfium
+    from PIL import ImageChops
+    import m3_generate as m3
+    blobs = {}
+    with pdfplumber.open(pdf_path) as pdf:
+        for pi in page_indices:
+            p = pdf.pages[pi]
+            blobs[pi] = m3._norm_txt("".join(c["text"] for c in p.chars))
+            p.flush_cache(); p.get_textmap.cache_clear()
+    src = pikepdf.open(pdf_path)
+    for pi in page_indices:
+        if blobs.get(pi):
+            try:
+                m3.remove_text_by_content(src.pages[pi], src, blobs[pi])
+            except Exception:
+                return True     # cannot prove it is a scan - let it through
+    fd, tmp = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    try:
+        src.save(tmp)
+        src.close()
+        a = pdfium.PdfDocument(pdf_path)
+        b = pdfium.PdfDocument(tmp)
+        try:
+            for pi in page_indices:
+                ia = a[pi].render(scale=0.5).to_pil().convert("L")
+                ib = b[pi].render(scale=0.5).to_pil().convert("L")
+                hist = ImageChops.difference(ia, ib).histogram()
+                changed = sum(hist[8:])     # pixels that moved >= 8 gray levels
+                if changed > 0.001 * ia.width * ia.height:
+                    return True
+        finally:
+            a.close(); b.close()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return False
 
 
 def run_one(pdf_path, name, engine, render):

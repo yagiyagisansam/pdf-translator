@@ -73,6 +73,19 @@ def run(name: str, engine: str = "mock"):
     keys = [_cache_key(engine, it) for it in items]
     results = [cache.get(k) for k in keys]
 
+    # TOKEN-ONLY units ("July 16, 2026" masked to a single ⟦T0⟧, a bare URL, a
+    # model number line): there is nothing for an engine to translate, and free
+    # endpoints often echo garbage or nothing for them. The masked text IS the
+    # correct output - restore() then yields the protected value (with dates
+    # already rendered as 2026年7月16日). No engine call, fully deterministic.
+    if validate:
+        for i, it in enumerate(items):
+            if results[i]:
+                continue
+            rest = re.sub(r"⟦T\d+⟧", "", it["text"])
+            if it["text"].strip() and not re.search(r"[A-Za-z]{2,}", rest):
+                results[i] = it["text"]
+
     def _safe_batch(fn, batch):
         """Never let an engine/network exception crash the whole run - a raise
         here would discard every already-translated unit. Degrade to untranslated

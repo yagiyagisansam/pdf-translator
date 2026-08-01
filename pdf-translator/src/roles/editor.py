@@ -566,14 +566,20 @@ def build(name, src_path, floor=6.0):
             for d in draws]
     json.dump(placed, open(f"{OUT}/{name}_placed.json", "w"))
 
-    # 3) overlay + merge
+    # 3) overlay + merge (canvas in DISPLAY space; _merge_overlay compensates
+    # for /Rotate pages)
     rd = PdfReader(src_path)
-    sizes = [(float(p.mediabox.width), float(p.mediabox.height),
-              float(p.mediabox.left), float(p.mediabox.bottom)) for p in rd.pages]
+    sizes = []
+    for pi2, p in enumerate(rd.pages):
+        lp = layout["pages"][pi2] if pi2 < len(layout["pages"]) else None
+        if lp:
+            sizes.append((float(lp["width"]), float(lp["height"])))
+        else:
+            sizes.append((float(p.mediabox.width), float(p.mediabox.height)))
     overlay = f"{OUT}/{name}_overlay.pdf"
     c = None
     for pi in range(len(sizes)):
-        pw, ph, xo, yo = sizes[pi]
+        pw, ph = sizes[pi]
         c = canvas.Canvas(overlay, pagesize=(pw, ph)) if c is None else c
         if pi:
             c.setPageSize((pw, ph))
@@ -596,7 +602,7 @@ def build(name, src_path, floor=6.0):
     over = PdfReader(overlay); w = PdfWriter(); w.append(PdfReader(stripped))
     for i, page in enumerate(w.pages):
         if i < len(over.pages):
-            page.merge_page(over.pages[i])
+            m3._merge_overlay(page, over.pages[i])
     out_path = f"{OUT}/{name}_ja.pdf"
     with open(out_path, "wb") as f:
         w.write(f)
