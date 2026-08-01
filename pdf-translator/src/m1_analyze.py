@@ -955,7 +955,15 @@ def analyze_pdf(path, name, render=True):
         # First pass to estimate body size, then detect the column gutter from body-region chars
         prelim = cluster_lines(chars)
         from collections import Counter
-        szs = Counter(round(l["size"]) for l in prelim if l["size"])
+        # votes are weighted by TEXT LENGTH, not line count: a chart's dozens
+        # of 1-2 char tick labels must not outvote the page's real paragraphs,
+        # or body_size collapses to the label size and the phantom "body"
+        # chars fabricate a column gutter through the middle of the chart
+        # (paragraphs then reflow into half-width lanes and overflow).
+        szs = Counter()
+        for l in prelim:
+            if l["size"]:
+                szs[round(l["size"])] += max(1, len(l["text"].strip()))
         body_size = szs.most_common(1)[0][0] if szs else 10
         body_chars = [c for c in chars
                       if abs(round(c.get("size", 0)) - body_size) <= 1]

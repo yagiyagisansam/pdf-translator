@@ -68,12 +68,30 @@ def _obstacle_figs(page):
     """Figures that should block text placement. A figure covering (almost) the
     whole page is a BACKGROUND (chapter-divider artwork, watermark, cover photo)
     - the source prints its text on top of it, so we must too; treating it as an
-    obstacle leaves the page's text nowhere to go."""
+    obstacle leaves the page's text nowhere to go. Likewise a figure that
+    CONTAINS most of the page's translatable text (a cover collage, a decorated
+    panel) is the canvas the text sits on, not something to flow around."""
     pw = page.get("width") or 612.0
     ph = page.get("height") or 792.0
+    trans = [b for b in page["blocks"] if b["type"] in TRANS]
+
+    def _area(b):
+        return max(b["x1"] - b["x0"], 0.0) * max(b["bottom"] - b["top"], 0.0)
+
+    def _inside(b, f):
+        ox = min(b["x1"], f["x1"]) - max(b["x0"], f["x0"])
+        oy = min(b["bottom"], f["bottom"]) - max(b["top"], f["top"])
+        if ox <= 0 or oy <= 0:
+            return 0.0
+        return ox * oy / max(_area(b), 1.0)
+
+    tot = sum(_area(b) for b in trans) or 1.0
     out = []
     for f in page.get("figures", []):
         if (f["x1"] - f["x0"]) * (f["bottom"] - f["top"]) >= 0.8 * pw * ph:
+            continue
+        cov = sum(_area(b) for b in trans if _inside(b, f) >= 0.7)
+        if cov >= 0.5 * tot:
             continue
         out.append(f)
     return out
