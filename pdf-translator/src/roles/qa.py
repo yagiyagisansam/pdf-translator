@@ -110,14 +110,21 @@ def _unit_bbox(u, layout):
 
 
 def _allowed_latin_blob(units, layout):
+    from m2_translate import _has_words
     parts = []
     for p in layout["pages"]:
         for b in p["blocks"]:
-            if b["type"] not in TRANS:
+            # non-translatable types stay verbatim - and so do translatable
+            # blocks with no real words (figure tick debris, leader dots):
+            # M2 deliberately leaves those in place
+            if b["type"] not in TRANS or not _has_words(b["text"]):
                 parts.append(b["text"])
     for u in units:
         parts.append(u.get("target") or u["source"])
-    return " ".join(_norm(t) for t in parts)
+    # joined WITHOUT separators: overprinted running heads ("AIM" drawn twice,
+    # 3pt apart, on AIM change pages) extract as one word ("AIMAIM") and must
+    # still match the two adjacent kept blocks
+    return "".join(_norm(t) for t in parts)
 
 
 def review(name, editor_report):
@@ -236,6 +243,34 @@ def review(name, editor_report):
     doc_body = (body_sizes[len(body_sizes) // 2] if body_sizes else 10) or 10
     if mode == "region":
         import statistics as _st
+        # a unit that was translated but never reached the page (its region's
+        # slots were all swallowed) or arrived truncated is DATA LOSS - the
+        # reader silently misses content. Placed lines carry uid + char count.
+        drawn_ch = {}
+        for lines in placed.values():
+            for ln in lines:
+                if ln.get("uid") is not None:
+                    drawn_ch[ln["uid"]] = drawn_ch.get(ln["uid"], 0) + \
+                        ln.get("nch", len(ln.get("text", "")))
+        lost, cut = [], []
+        for u in units:
+            tgt = u.get("target")
+            if not tgt:
+                continue
+            got = drawn_ch.get(u["uid"], 0)
+            if got == 0:
+                lost.append(u["uid"])
+            elif got < len(tgt) - 2:
+                cut.append(u["uid"])
+        if lost:
+            defects.append({"role": "editor", "kind": "unit_dropped",
+                            "detail": f"{len(lost)} translated unit(s) never "
+                                      f"drawn: uids {lost[:8]}",
+                            "param": "shrink"})
+        if cut:
+            defects.append({"role": "editor", "kind": "unit_truncated",
+                            "detail": f"{len(cut)} unit(s) drawn truncated: "
+                                      f"uids {cut[:8]}", "param": "shrink"})
         src_geo = {}
         for u in units:
             if not u.get("target"):
