@@ -370,6 +370,39 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
 # is called ~20x per unit during the font-size search, so this dominates M3 time.
 _W_CACHE = {}
 
+_COVER = {"set": None}
+
+
+def _glyph_cover():
+    """Unicode codepoints the output font actually covers (full Noto CJK cmap,
+    loaded lazily once)."""
+    if _COVER["set"] is None:
+        from make_jp_font import find_font
+        from fontTools.ttLib import TTCollection, TTFont as _FT
+        p = find_font("regular")
+        f = (TTCollection(p, lazy=True).fonts[0]
+             if p.lower().endswith(".ttc") else _FT(p, lazy=True))
+        cover = set()
+        for table in f["cmap"].tables:
+            if table.isUnicode():
+                cover |= set(table.cmap.keys())
+        _COVER["set"] = cover
+    return _COVER["set"]
+
+
+def sanitize_targets(units):
+    """Replace characters the output font has NO GLYPH for (dingbat bullets
+    like ❑ U+2751 that survive translation verbatim) with a visible generic
+    bullet - otherwise they render as tofu boxes. 1:1 per char, so unit text
+    lengths (relied on by QA's truncation check) never change."""
+    cover = _glyph_cover()
+    for u in units:
+        t = u.get("target")
+        if t and any(ord(ch) > 127 and ord(ch) not in cover for ch in t):
+            u["target"] = "".join(
+                ch if ord(ch) <= 127 or ord(ch) in cover else "•" for ch in t)
+
+
 # chars that must not START a line (行頭禁則) - hung on the previous line instead
 _KINSOKU_HEAD = set("、。，．・：；)]｝」』〕）〉》！？!?,.;:%％…‥ー々")
 
@@ -547,6 +580,7 @@ def generate(name, src_path):
     ensure_out()
     _register_fonts()
     units=json.load(open(f"{OUT}/{name}_bilingual.json"))
+    sanitize_targets(units)
     layout=json.load(open(f"{OUT}/{name}_layout.json"))
     unit_for_block={}
     for u in units:

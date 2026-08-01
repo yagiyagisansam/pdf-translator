@@ -454,6 +454,7 @@ def build(name, src_path, floor=6.0):
     m3._register_fonts()
     layout = json.load(open(f"{OUT}/{name}_layout.json"))
     units = json.load(open(f"{OUT}/{name}_bilingual.json"))
+    m3.sanitize_targets(units)   # no-glyph chars (dingbats) -> visible bullet
 
     # Slide decks (any landscape page) and poster/brochure-style documents don't
     # fit the paper reflow band model - their text boxes are scattered islands

@@ -39,7 +39,7 @@ def find_font(weight):
         f"(Debian/Ubuntu: sudo apt-get install fonts-noto-cjk) or set "
         f"NOTO_CJK_{weight.upper()} to the .ttc/.otf path.")
 
-BASE_CHARS = ("　、。・！？（）「」『』ー％＝±×〜0123456789.,;:%()<>=±/-"
+BASE_CHARS = ("　、。・！？（）「」『』ー％＝±×〜0123456789.,;:%()<>=±/-•…"
               "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz ")
 
 def used_chars(names):
