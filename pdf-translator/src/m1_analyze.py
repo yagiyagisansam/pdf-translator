@@ -495,17 +495,30 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             if gap > 0.45 * page_text_w:
                 continue
             if _numericish(m["text"]) or _row_rule_spans(l, m):
-                return True
-        return False
+                return "cell"
+            # PARALLEL WORD-LIST COLUMNS ("banking hours | eye opener |
+            # real estate"): both lines are SHORT - the body lines of a real
+            # two-column document fill their column width and never match.
+            # Without the seal each column merges into a run-on paragraph
+            # ("冷酷な脚注無分別な非法行為..." gibberish) drawn over the
+            # other columns' surviving English. Tagged "list" so the stacked-
+            # cell merge never chains the stack back together.
+            if len(l["text"]) <= 32 and len(m["text"]) <= 32 and gap >= 12:
+                return "list"
+        return None
 
     # a DOT-LEADER line (TOC row "Title . . . . 1-1-12") is one row of a
     # leadered list even when the leader glues the title and the page number
     # into a single segment - sealing it keeps rows from chaining into one
     # run-on paragraph of dots
     _leader = re.compile(r"(?:[.·⋅]\s*){5,}")
-    record_rows = {id(l) for l in ls
-                   if _is_record_row(l) or _is_contact_line(l["text"])
-                   or _leader.search(l["text"])}
+    record_rows, list_rows = set(), set()
+    for l in ls:
+        why = _is_record_row(l)
+        if why or _is_contact_line(l["text"]) or _leader.search(l["text"]):
+            record_rows.add(id(l))
+        if why == "list":
+            list_rows.add(id(l))
     open_blocks, done = [], []
     for l in ls:
         lh = (l["bottom"] - l["top"]) or 1.0
@@ -570,7 +583,8 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
         if best is None:
             blk = {"lines": [l], "x0": l["x0"], "x1": l["x1"],
                    "top": l["top"], "bottom": l["bottom"],
-                   "size_med": l["size"], "record": id(l) in record_rows}
+                   "size_med": l["size"], "record": id(l) in record_rows,
+                   "list": id(l) in list_rows}
             # a record row (TOC/table row) is sealed: one line = one block,
             # nothing may attach to it
             (done if id(l) in record_rows else open_blocks).append(blk)
@@ -586,7 +600,10 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
     # own record row (the header underline rule spans the row), which made
     # three one-line cells whose translations wrap chaotically. Vertically
     # adjacent record rows that share their x-range are ONE cell.
-    recs = [b for b in done + open_blocks if b.get("record")]
+    # list ITEMS (parallel word-list rows) are independent entries, never the
+    # stacked lines of one cell - exclude them or the whole column re-chains
+    recs = [b for b in done + open_blocks
+            if b.get("record") and not b.get("list")]
     recs.sort(key=lambda b: (b["x0"], b["top"]))
     merged_away = set()
     for a in recs:
@@ -625,6 +642,8 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
         blk["col"] = assign_column(blk, mid, left, right)
         if b.get("record"):
             blk["record"] = True
+        if b.get("list"):
+            blk["list"] = True
         blocks.append(blk)
     return blocks
 

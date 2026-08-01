@@ -270,6 +270,11 @@ def build_units(layout):
                 # (critical on slides; harmless on prose).
                 if _BULLET_RE.match(nb["text"]):
                     break
+                # PARALLEL-LIST rows ("banking hours" / "blood pressure" ...)
+                # are independent items: the lowercase-continuation heuristic
+                # would chain the whole column into one run-on unit
+                if pb.get("list") or nb.get("list"):
+                    break
                 flag_link = pb.get("continues_to_next_page") and nb.get("continues_from_prev_page")
                 if flag_link or _continues(pb["text"], nb["text"], nb["type"]):
                     parts.append((npi, nbi, nb))

@@ -572,10 +572,20 @@ def build(name, src_path, floor=6.0):
         kill[pi] = kill_drop[pi] = ""
         if pi in skip_pages:
             continue                       # leave this page's English untouched
+        covered = []
         for bi, b in enumerate(p["blocks"]):
             if b["type"] in TRANS and f"{pi}:{bi}" in unit_for_block:
                 kill[pi] += m3._norm_txt(b["text"])
                 kill_drop[pi] += m3._norm_txt_drop(b["text"])
+                covered.append(b)
+        # ROW-MAJOR blob: the content stream often draws one op per VISUAL ROW
+        # across parallel columns ("afterglow forget-me-not right-of-way"),
+        # while the blob above is column-major - the op can only match a blob
+        # rebuilt in row order. "|" separates the two orders (op text is
+        # alnum-only after normalization, so it can never bridge them).
+        rows = sorted(covered, key=lambda b: (round(b["top"] / 4.0), b["x0"]))
+        kill[pi] += "|" + "".join(m3._norm_txt(b["text"]) for b in rows)
+        kill_drop[pi] += "|" + "".join(m3._norm_txt_drop(b["text"]) for b in rows)
             elif b["type"] in TRANS and re.search(r"[A-Za-z]", b["text"]):
                 # translatable but NOT covered by a translated unit: its English
                 # stays on the page, so mark it so the reflow treats it as an

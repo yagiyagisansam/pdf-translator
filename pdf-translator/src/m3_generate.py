@@ -735,6 +735,7 @@ def generate(name, src_path):
     kill_blob_drop = {pi: "" for pi in range(len(layout["pages"]))}
     unit_regions = {}   # uid -> (unit, regions)
     for pi, p in enumerate(layout["pages"]):
+        covered = []
         for bi, b in enumerate(p["blocks"]):
             if b["type"] not in TRANS:
                 continue
@@ -744,6 +745,12 @@ def generate(name, src_path):
                 continue
             kill_blob[pi] += _norm_txt(b["text"])
             kill_blob_drop[pi] += _norm_txt_drop(b["text"])
+            covered.append(b)
+        # ROW-MAJOR blob (see editor.build): one op can span a visual row
+        # across parallel columns - it only matches a row-ordered blob
+        rows = sorted(covered, key=lambda b: (round(b["top"] / 4.0), b["x0"]))
+        kill_blob[pi] += "|" + "".join(_norm_txt(b["text"]) for b in rows)
+        kill_blob_drop[pi] += "|" + "".join(_norm_txt_drop(b["text"]) for b in rows)
 
     for u in units:
         if not u.get("target"):
