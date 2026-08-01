@@ -13,6 +13,10 @@ from config import OUT, ensure_out
 # ---- token protection -------------------------------------------------------
 # Patterns whose matched text must survive translation verbatim.
 PROTECT_PATTERNS = [
+    # a dot leader with its trailing page/section number (". . . . . 1-1-12"):
+    # masked whole so the engine translates only the row's TITLE - otherwise
+    # the dots come back as 。。。 and the row number gets scattered
+    ("LEADER", re.compile(r"(?:[.·⋅]\s*){4,}[\s\d\-–./]*$")),
     ("URL",   re.compile(r"https?://\S+")),
     ("DOI",   re.compile(r"\bdoi:\S+", re.I)),
     ("EMAIL", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")),
@@ -25,9 +29,22 @@ PROTECT_PATTERNS = [
     ("NUM",   re.compile(r"[<>≈=]?\s?\d[\d.,]*\s?(?:±\s?\d[\d.,]*)?\s?"
                          r"(?:%|cm|mm|m|kg|g|s|ms|Hz|N|m/s2?|°|yrs?|kg/m2|weeks?)?"
                          r"(?![A-Za-z0-9])")),
-    # bare web/domain names (leonardo.com) - a URL pattern without the scheme
+    # a date ("January 17, 2025" / "17 January 2025") - the free engine scatters
+    # the masked day/year tokens around the sentence ("1月にアクセス17,2025");
+    # protected whole, it is deterministically rendered as 2025年1月17日
+    ("DATE",  re.compile(r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
+                         r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|"
+                         r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+"
+                         r"(\d{1,2}),?\s+(\d{4})\b")),
+    ("DATE2", re.compile(r"\b(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|"
+                         r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
+                         r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+                         r"Dec(?:ember)?)\.?,?\s+(\d{4})\b")),
+    # bare web/domain names (leonardo.com) - a URL pattern without the scheme.
+    # The optional PATH keeps multi-segment links whole (www.faa.gov/x/y/z)
     ("SITE",  re.compile(r"\b[\w-]+(?:\.[\w-]+)*"
-                         r"\.(?:com|org|net|io|gov|edu|info|co\.[a-z]{2})\b")),
+                         r"\.(?:com|org|net|io|gov|edu|info|co\.[a-z]{2})"
+                         r"(?:/[^\s)\]}>,;\"']*)?\b")),
     # universal technical/aviation abbreviations a literal MT engine mangles
     # ("HIGE" -> beard). Domain constants, not per-document tuning.
     ("ABBR",  re.compile(r"\b(?:CMVJ|SPJ|AFTE|SPAD|NAMI|NASA|ICC|ES|QA|AVT|3D|"
@@ -38,12 +55,30 @@ PROTECT_PATTERNS = [
     ("MODEL", re.compile(r"\b[A-Z]{1,5}\d{1,4}(?:-\d+[A-Z]*|-[A-Z]+\d*)?\b")),
 ]
 
+_MONTH_NUM = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+              "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+
+
+def _date_jp(m, month_group, day_group, year_group):
+    """Render a protected English date as a Japanese date (deterministic - no
+    engine involved), e.g. 'January 17, 2025' -> '2025年1月17日'."""
+    mon = _MONTH_NUM.get(m.group(month_group)[:3].lower())
+    if not mon:
+        return m.group().strip()
+    return f"{m.group(year_group)}年{mon}月{int(m.group(day_group))}日"
+
+
 def protect(text):
     """Replace protected spans with placeholders ⟦Tn⟧; return (masked_text, mapping)."""
     spans = []
     for label, rx in PROTECT_PATTERNS:
         for m in rx.finditer(text):
-            s = m.group().strip()
+            if label == "DATE":
+                s = _date_jp(m, 1, 2, 3)
+            elif label == "DATE2":
+                s = _date_jp(m, 2, 1, 3)
+            else:
+                s = m.group().strip()
             if s:
                 spans.append((m.start(), m.end(), s))
     # resolve overlaps: keep earliest, longest
@@ -73,6 +108,20 @@ def restore(text, mapping):
 # ---- build translation units ------------------------------------------------
 TRANSLATABLE = {"body", "heading", "caption", "title"}
 
+
+# a real word: Capitalized/lowercase run of 3+ letters, or a 3+ letter acronym.
+# Rejects figure debris like ".t...tItI." (weird-case runs) and dot leaders,
+# while keeping "NDB", "Box", "Nondirectional" - so a TOC row with a long dot
+# leader still translates but tick-label junk never does.
+_WORD_OK = re.compile(r"\b(?:[A-Za-z][a-z]{2,}|[A-Z]{3,})\b")
+
+
+def _has_words(text):
+    """True when the block contains at least one real word to translate.
+    Translating letter-debris (chart tick labels, leader dots) yields junk
+    drawn over artwork; such blocks stay verbatim."""
+    return bool(_WORD_OK.search(text or ""))
+
 SENT_END = tuple(".!?。:;")
 
 # leading list-item markers: bullet, dash variants, middle dot, checkbox
@@ -100,6 +149,12 @@ def _continues(prev_text, next_text, next_type):
     # hyphenated word split across blocks
     if t.endswith("-"):
         return True
+    # a paragraph ending with a URL/email/domain is an instruction line
+    # ("... go to https://x/y") - terminal, even without punctuation. Without
+    # this the next paragraph chains on and gets dragged to the wrong position.
+    if re.search(r"(?:https?://\S+|www\.\S+|\S+@\S+\.\w+|"
+                 r"\.(?:com|gov|org|net|edu|io|mil)(?:/\S*)?)$", t):
+        return False
     # a paragraph ending with a FOOTNOTE/CITATION marker ("...compact area).4",
     # "...ability.4–6") IS sentence-final - without stripping the trailing
     # digits, consecutive paragraphs chain into one giant unit
@@ -156,7 +211,7 @@ def build_units(layout):
     for pi, page in enumerate(pages):
         ordered = sorted(
             [(bi, b) for bi, b in enumerate(page["blocks"])
-             if b["type"] in TRANSLATABLE and re.search(r"[A-Za-z]", b["text"])],
+             if b["type"] in TRANSLATABLE and _has_words(b["text"])],
             key=lambda x: x[1].get("order", 1e9))
         for bi, b in ordered:
             seq.append((pi, bi, b))

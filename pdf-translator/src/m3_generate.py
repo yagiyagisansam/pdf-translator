@@ -370,19 +370,60 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
 # is called ~20x per unit during the font-size search, so this dominates M3 time.
 _W_CACHE = {}
 
+# chars that must not START a line (行頭禁則) - hung on the previous line instead
+_KINSOKU_HEAD = set("、。，．・：；)]｝」』〕）〉》！？!?,.;:%％…‥ー々")
+
+
+def _ascii_wordish(ch):
+    return ch.isascii() and (ch.isalnum() or ch in "'’")
+
+
 def _wrap(text, font, size, max_w):
+    """Wrap text to max_w. Breaks prefer WORD BOUNDARIES so an ASCII word or a
+    URL segment is never split mid-token ("faasafety.go/v"), and a line never
+    starts with closing punctuation (行頭禁則). Invariant (relied on by
+    _remaining_after): the concatenation of the returned lines equals `text`
+    minus newlines - breaks are only re-arranged, characters never added or
+    dropped."""
     cache = _W_CACHE.setdefault((font, size), {})
-    lines=[]; cur=""; cur_w=0.0
-    for ch in text:
-        if ch=="\n": lines.append(cur); cur=""; cur_w=0.0; continue
+
+    def W(ch):
         w = cache.get(ch)
         if w is None:
             w = cache[ch] = stringWidth(ch, font, size)
-        if cur_w + w <= max_w:
+        return w
+
+    lines = []
+    cur = ""; cur_w = 0.0; brk = -1     # last break opportunity (index in cur)
+    for ch in text:
+        if ch == "\n":
+            lines.append(cur); cur = ""; cur_w = 0.0; brk = -1
+            continue
+        w = W(ch)
+        if cur_w + w <= max_w or not cur:
+            if cur and not (_ascii_wordish(cur[-1]) and _ascii_wordish(ch)):
+                brk = len(cur)
             cur += ch; cur_w += w
+            continue
+        # overflow - kinsoku first: closing punctuation hangs on this line
+        if ch in _KINSOKU_HEAD:
+            lines.append(cur + ch); cur = ""; cur_w = 0.0; brk = -1
+            continue
+        # break at the last word boundary when we are inside an ASCII word,
+        # so the whole word moves to the next line instead of splitting
+        if _ascii_wordish(ch) and _ascii_wordish(cur[-1]) and brk > 0:
+            head, tail = cur[:brk], cur[brk:]
         else:
-            lines.append(cur); cur = ch; cur_w = w
-    if cur: lines.append(cur)
+            head, tail = cur, ""
+        lines.append(head)
+        cur = tail + ch
+        cur_w = sum(W(c) for c in cur)
+        brk = -1
+        for i in range(1, len(cur)):
+            if not (_ascii_wordish(cur[i - 1]) and _ascii_wordish(cur[i])):
+                brk = i
+    if cur:
+        lines.append(cur)
     return lines
 
 def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
@@ -461,6 +502,7 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
 
     # distribute lines into each region's free slots
     remaining = text
+    drawn = 0
     for ri, (pi, rb) in enumerate(regs):
         w = max(10, rb["x1"] - rb["x0"])
         slots, lh = region_slots(rb, size)
@@ -472,9 +514,27 @@ def _flow_unit_across_regions(text, btype, regs, layout, per_page_draws,
             per_page_draws[pi].append({"x": rb["x0"], "y_top": y, "size": size,
                                        "font": font, "line": ln, "uid": uid,
                                        "color": color})
+        drawn += len(take)
         remaining = _remaining_after(remaining, take)
         if not remaining:
             break
+    if drawn == 0 and text:
+        # NEVER drop a translated unit silently. If every region's slots were
+        # eaten by obstacle bands (interlocking source boxes, decoration), draw
+        # at the source position anyway - the source had text exactly there, so
+        # this is still faithful; QA will flag any genuine collision it causes.
+        pi, rb = regs[0]
+        w = max(10, rb["x1"] - rb["x0"])
+        lh = size * 1.16
+        y = rb["top"]
+        page_bottom = layout["pages"][pi]["height"] * 0.98
+        for ln in _wrap(text, font, size, w):
+            if y + lh > page_bottom:
+                break
+            per_page_draws[pi].append({"x": rb["x0"], "y_top": y, "size": size,
+                                       "font": font, "line": ln, "uid": uid,
+                                       "color": color})
+            y += lh
 
 def _remaining_after(text, taken_lines):
     """Return the suffix of text after removing the characters in taken_lines.
@@ -526,18 +586,28 @@ def generate(name, src_path):
         CAP_CLEAR = 26.0
         # push start below an overlapping figure (captions need more clearance:
         # chart axis labels render slightly OUTSIDE the detected image bbox)
+        src_top, src_h = top, max(bottom - top, 1.0)
+        on_figs = set()
         for f in figs:
             if not overlaps_x(x0, x1, f["x0"], f["x1"]):
                 continue
             # text DESIGNED on the figure (a callout label / cover title overlaid
-            # on a photo) keeps its position - only text clipping the figure's
-            # edge is pushed clear of it
-            ov_y = min(bottom, f["bottom"]) - max(top, f["top"])
-            if ov_y >= 0.6 * max(bottom - top, 1.0):
+            # on a photo, a title crossing a decorative background shape) keeps
+            # its position - only text clipping the figure's edge is pushed
+            # clear of it. Such figures are also exempted from this region's
+            # obstacle bands later: the source text already sat on them, so
+            # drawing there is faithful (without the exemption a decorative
+            # shape swallowed the whole region and the text was silently lost).
+            ov_y = min(bottom, f["bottom"]) - max(src_top, f["top"])
+            if ov_y >= 0.3 * src_h:
+                on_figs.add(id(f))
                 continue
+            if ov_y <= 1.0:
+                continue    # near-miss adjacency is NOT an overlap: pushing on
+                            # a 2pt graze cascaded the region below its source
             clear = CAP_CLEAR if btype == "caption" else FIG_MARGIN
             fb = f["bottom"] + clear
-            if top < fb and bottom > f["top"] - 2 and fb < bottom + 80:
+            if top < fb and fb < bottom + 80:
                 top = max(top, fb)
         # nearest element below that overlaps horizontally => available bottom.
         # Blocks that merely ABUT the unit's bbox (gap < 0.5pt, e.g. the keywords
@@ -559,7 +629,7 @@ def generate(name, src_path):
                 avail_bottom = min(avail_bottom, f["top"] - FIG_MARGIN)
         avail_bottom = max(bottom, avail_bottom - 2.0)
         return {"x0": x0, "x1": x1, "top": top, "avail_bottom": avail_bottom,
-                "own": own, "page": pi, "obstacles": []}
+                "own": own, "page": pi, "obstacles": [], "on_figs": on_figs}
 
     # Per page, the concatenated normalized text of all TRANSLATED blocks.
     # The content-based kill removes any text-show op whose text is part of this blob.
@@ -656,6 +726,8 @@ def generate(name, src_path):
                 if overlaps_x(rb["x0"], rb["x1"], b["x0"], b["x1"]):
                     bands.append((b["top"] - 1.0, b["bottom"] + 1.0))
             for f in p.get("figures", []):
+                if id(f) in rb.get("on_figs", ()):
+                    continue    # source text sat ON this figure - not an obstacle
                 if overlaps_x(rb["x0"], rb["x1"], f["x0"], f["x1"]):
                     bands.append((f["top"] - 8.0, f["bottom"] + 8.0))
             # vector rules (table borders, separators) stay in place - text must
@@ -713,7 +785,8 @@ def generate(name, src_path):
             {"x0": d["x"], "top": d["y_top"],
              "x1": d["x"] + stringWidth(d["line"], d["font"], d["size"]),
              "bottom": d["y_top"] + d["size"] * 1.16,
-             "text": d["line"][:40], "uid": d.get("uid"), "size": d["size"]}
+             "text": d["line"][:40], "uid": d.get("uid"), "size": d["size"],
+             "nch": len(d["line"])}
             for d in draws]
     with open(f"{OUT}/{name}_placed.json", "w") as f:
         json.dump(placed, f)

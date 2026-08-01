@@ -13,7 +13,7 @@ Robustness for API engines:
   re-running a document (or a revised document with unchanged paragraphs)
   does not re-pay API calls.
 """
-import hashlib, os, re, sys, json
+import hashlib, os, re, sys, json, time
 from translator import get_translator
 from m2_translate import restore
 from config import OUT, MOCK_MEMO, ensure_out
@@ -95,10 +95,16 @@ def run(name: str, engine: str = "mock"):
             # endpoints intermittently return an empty translation) - a second
             # attempt usually succeeds and an English paragraph left behind is
             # far more visible than one extra request
-            empty = [i for i in miss if not results[i] and items[i]["text"].strip()]
-            if empty:
-                print(f"[{name}] retrying {len(empty)} unit(s) with empty results",
-                      file=sys.stderr)
+            for attempt in range(3):
+                empty = [i for i in miss
+                         if not results[i] and items[i]["text"].strip()]
+                if not empty:
+                    break
+                print(f"[{name}] retrying {len(empty)} unit(s) with empty results "
+                      f"(attempt {attempt + 1})", file=sys.stderr)
+                if attempt:
+                    time.sleep(1.5 * attempt)   # brief backoff before hitting
+                                                # the free endpoint again
                 redo = _safe_batch(translator.translate_batch,
                                    [items[i] for i in empty])
                 for i, r in zip(empty, redo):

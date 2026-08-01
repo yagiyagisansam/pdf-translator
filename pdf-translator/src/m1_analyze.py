@@ -44,6 +44,22 @@ def _char_segments(chars, gutter=None):
     widths = [c["x1"] - c["x0"] for c in chars]
     mw = statistics.median(widths) or 4.0
     chars = sorted(chars, key=lambda c: (c["top"], c["x0"]))
+    # DEDUPE double-printed chars: many PDFs draw the same glyph twice at (near)
+    # identical coordinates (fill+stroke bold emulation, overlaid form fields).
+    # Without this the duplicates interleave by x and every word doubles
+    # ("AIM AIM" -> "AAIIMM"), which poisons segmentation AND translation.
+    seen = set()
+    deduped = []
+    for c in chars:
+        qx = int(c["x0"] * 3)          # 1/3pt buckets; check both neighbours so
+        qy = int(c["top"] * 3)         # a pair straddling a bucket edge still hits
+        keys = [(c["text"], qx + dx, qy + dy)
+                for dx in (0, 1, -1) for dy in (0, 1, -1)]
+        if any(k in seen for k in keys):
+            continue
+        seen.add(keys[0])
+        deduped.append(c)
+    chars = deduped
     open_segs, done = [], []
     for c in chars:
         ch_h = (c["bottom"] - c["top"]) or 1.0
@@ -260,6 +276,10 @@ def _mkline(seg, mw):
     # literal "(cid:239)" would pollute the translation input and output.
     if "(cid:" in text:
         text = re.sub(r"\(cid:\d+\)", "-", text)
+    # Private-Use-Area chars (Wingdings checkboxes/bullets) survive translation
+    # verbatim but have no glyph in the output font - they render as tofu.
+    # A generic list bullet is the faithful visible substitute.
+    text = re.sub("[\\ue000-\\uf8ff]", "•", text)
     sizes = [c.get("size", 0) for c in seg if c.get("size")]
     fonts = [c.get("fontname", "") for c in seg]
     bold = sum(1 for f in fonts if "bold" in f.lower()) / max(1, len(fonts))
@@ -302,6 +322,46 @@ def assign_column(line, mid, left, right):
 
 HEAD_RE = re.compile(r"^\d+(\.\d+)*\.?\s+[A-Z]")
 CAP_RE = re.compile(r"^(Fig\.?|Figure|Table)\b", re.I)
+# a number followed by a measurement unit is DATA mid-sentence ("... range of
+# 108.10 to  111.95 MHz."), never a section heading - without this guard the
+# decimal matches HEAD_RE and the sentence is split at the line break
+_HEAD_UNIT_GUARD = re.compile(
+    r"^\d+(?:\.\d+)*\.?\s+(?:MHz|GHz|kHz|Hz|NM|nm|ft|feet|km|kg|lbs?|kt|kts|"
+    r"mm|cm|m|s|sec|min|hrs?|hours?|%|°[CF]?|dB|psi|mi|yd)\b")
+
+
+def _headish(t):
+    return bool(HEAD_RE.match(t)) and not _HEAD_UNIT_GUARD.match(t)
+
+
+# contact/address lines (a phone number, "P.O. Box 25082", "Oklahoma City, OK
+# 73125", a bare URL/email line). Sealed one line = one block: merging them
+# into a paragraph turns the address into run-on prose and garbles it in
+# translation ("P.O.ボックス25 082オクラホマシティー").
+_CONTACT_RES = (
+    re.compile(r"\(\d{3}\)\s?\d{3}[-–]\d{4}"),          # (405) 954-4831
+    re.compile(r"\+\d[\d\s().\-]{7,}\d$"),               # +44 (0)1234 567890
+    re.compile(r"\bP\.?\s?O\.?\s?Box\s+\d+", re.I),      # P.O. Box 25082
+    re.compile(r"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b"),      # ..., OK 73125
+    # NOTE: a bare-URL line is NOT sealed - a URL often continues on the next
+    # line, and sealing the first half would orphan the continuation. URLs are
+    # kept whole by the space-less line join + M2 token protection instead.
+)
+
+
+def _is_contact_line(text):
+    t = (text or "").strip()
+    if not t or len(t) > 64:
+        return False
+    for rx in _CONTACT_RES:
+        m = rx.search(t)
+        if m:
+            rest = (t[:m.start()] + " " + t[m.end():]).strip()
+            # the line must BE the contact info (few words around the match),
+            # not a prose sentence that merely mentions a phone number
+            if len([w for w in rest.split() if re.search(r"[A-Za-z]", w)]) <= 3:
+                return True
+    return False
 REF_RE = re.compile(r"^\d+\.\s+[A-Z][a-z]+")  # ref list "1. Sheppard JM..."
 
 def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
@@ -340,7 +400,7 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
         return "reference"
     if page_idx == 0 and b["size"] >= body_size * 1.5:
         return "title"
-    if (b["bold"] and HEAD_RE.match(t)) or HEAD_RE.match(t) or (b["bold"] and b["size"] >= body_size * 1.05 and len(t) < 60):
+    if _headish(t) or (b["bold"] and b["size"] >= body_size * 1.05 and len(t) < 60):
         return "heading"
     # Mostly-UPPERCASE short blocks are headings even at body size and even
     # without a bold flag ("h. 7-1-1. NATIONAL WEATHER SERVICE ..." in
@@ -433,7 +493,14 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                 return True
         return False
 
-    record_rows = {id(l) for l in ls if _is_record_row(l)}
+    # a DOT-LEADER line (TOC row "Title . . . . 1-1-12") is one row of a
+    # leadered list even when the leader glues the title and the page number
+    # into a single segment - sealing it keeps rows from chaining into one
+    # run-on paragraph of dots
+    _leader = re.compile(r"(?:[.·⋅]\s*){5,}")
+    record_rows = {id(l) for l in ls
+                   if _is_record_row(l) or _is_contact_line(l["text"])
+                   or _leader.search(l["text"])}
     open_blocks, done = [], []
     for l in ls:
         lh = (l["bottom"] - l["top"]) or 1.0
@@ -442,7 +509,11 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
         for b in open_blocks:
             (done if b["bottom"] < l["top"] - allowed - 0.1 else still).append(b)
         open_blocks = still
-        starts_new = (bool(HEAD_RE.match(l["text"])) or bool(CAP_RE.match(l["text"]))
+        # a line starting with a bullet marker begins a NEW list item - gluing
+        # it to the previous block turns the whole list into one run-on
+        # paragraph (M2's bullet boundary only works if M1 kept them apart)
+        starts_new = (_headish(l["text"]) or bool(CAP_RE.match(l["text"]))
+                      or bool(re.match(r"[•‣⁃▪●·∙]\s", l["text"]))
                       or id(l) in record_rows)
         best = best_score = None
         if not starts_new and id(l) not in record_rows:
@@ -480,7 +551,14 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                         ((cr_l >= 0.7 and cr_b < 0.45) or (cr_l < 0.45 and cr_b >= 0.7)):
                     continue
                 if l["x0"] - b["x0"] > page_text_w * 0.03:
-                    continue    # indented line = new paragraph
+                    # indented line = new paragraph - EXCEPT centered display
+                    # text (a two-line cover title, a centered address line):
+                    # centered lines legitimately shift their left edge, so
+                    # accept the join when the line CENTERS align instead
+                    lc = (l["x0"] + l["x1"]) / 2
+                    bc = (b["x0"] + b["x1"]) / 2
+                    if abs(lc - bc) > max(8.0, (l["size"] or 8.0) * 0.6):
+                        continue
                 score = (ov / wmin, -gap)
                 if best is None or score > best_score:
                     best, best_score = b, score
@@ -530,6 +608,30 @@ def _numericish(text):
 _DIGIT_ANY_RE = re.compile(r"\d")
 
 
+def _join_line_texts(lines):
+    """Join a block's line texts. A URL split across lines must NOT get a space
+    injected mid-path ("faa.gov/pilots/safety/ pilotsafetybrochures" - the
+    fragment after the space escapes URL protection and gets translated), and a
+    word hyphenated at the line end ("informa-/tion") is rejoined so the
+    translation engine sees the real word."""
+    text = ""
+    for l in lines:
+        t = l["text"]
+        if not text:
+            text = t
+            continue
+        m = re.search(r"\S+$", text)
+        last = m.group() if m else ""
+        if re.match(r"(?:https?://|www\.)", last) and last[-1] in "/-_=?&.":
+            text += t                       # URL continues - no space
+        elif text.endswith("-") and len(last) > 2 and last[:-1].isalpha() \
+                and t[:1].islower():
+            text = text[:-1] + t            # de-hyphenate a split word
+        else:
+            text += " " + t
+    return text.strip()
+
+
 def _mkblock(lines, col):
     lines = sorted(lines, key=lambda l: (l["top"], l["x0"]))
     from collections import Counter
@@ -539,7 +641,7 @@ def _mkblock(lines, col):
         "color": list(color),
         "x0": min(l["x0"] for l in lines), "x1": max(l["x1"] for l in lines),
         "top": min(l["top"] for l in lines), "bottom": max(l["bottom"] for l in lines),
-        "text": " ".join(l["text"] for l in lines).strip(),
+        "text": _join_line_texts(lines),
         "size": statistics.median([l["size"] for l in lines if l["size"]] or [0]),
         "bold": sum(l["bold"] for l in lines) > len(lines)/2,
         "nlines": len(lines),
