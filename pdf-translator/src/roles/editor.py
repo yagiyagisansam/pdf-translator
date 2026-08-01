@@ -305,6 +305,19 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
             y += size * LR
         taken.append((x0, x0 + width, u["_top"] - 1, y + 1))
         return draws
+    # SHRINK-TO-FIT: an infographic box label / margin note should stay
+    # INSIDE its own box. Japanese that wraps far taller than the source
+    # cascades down into the next box's area and the boxes' texts pile up.
+    # Shrink (bounded - readability floor and 62% of source) until the
+    # wrapped height roughly matches the source height, THEN flow.
+    _w0 = max(12.0, x1 - x0)
+    _src_sz = u.get("_size") or size
+    _src_h = max(1, u.get("_nlines", 1)) * _src_sz * 1.3 + 2
+    _floor = max(4.6, 0.62 * _src_sz)
+    while size > _floor and \
+            len(m3._wrap(u["target"], font, size, _w0)) * size * LR \
+            > _src_h * 1.15:
+        size -= 0.25
     lh = size * LR
     # figures and KEPT TEXT are real obstacles always (a margin icon's badge
     # word must never be overdrawn); only RULE bands get the thin-band
@@ -550,6 +563,17 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
         else:
             draws, ov = _layout_page(page, pu, factor_min, _font_of)
             best = draws
+            # EMERGENCY: dropping lines loses content the reader can never
+            # recover; tiny-but-present text is strictly better. Push below
+            # the readability floor only as far as needed to fit.
+            f2 = factor_min
+            while ov and f2 > 0.34:
+                f2 = max(0.34, f2 - 0.07)
+                d2, o2 = _layout_page(page, pu, f2, _font_of)
+                if o2 < ov:
+                    best, ov = d2, o2
+                if o2 == 0:
+                    break
             total_overflow += ov
         per_page[pi] = best
     return per_page, total_overflow

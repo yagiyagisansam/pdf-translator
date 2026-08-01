@@ -321,11 +321,18 @@ def find_gutter(chars, page_w, x0=0):
     # text stays on its own side, so what remains exposes the whitespace band.
     band = width * 0.04
     col_chars = []
+    crossing = 0
     for seg in _char_segments(chars):
         rl = min(c["x0"] for c in seg); rr = max(c["x1"] for c in seg)
         if rl < mid_guess - band and rr > mid_guess + band:
+            crossing += len(seg)
             continue
         col_chars.extend(seg)
+    # a page whose text is MOSTLY full-width lines is a single-column page
+    # with an inset box/sidebar - the side-confined leftovers must not
+    # fabricate a gutter (paragraphs would reflow into phantom half lanes)
+    if crossing > 0.5 * len(chars):
+        return None
     if len(col_chars) < 40:
         col_chars = chars  # fallback
 
