@@ -331,18 +331,42 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         while j < tn and (not dropped[text_idx[j]]) and _is_frag(text_idx[j]):
             j += 1
         run = [text_idx[m] for m in range(k, j)]
-        joined = "".join((op_uni[idx] if op_uni[idx] is not None
-                          else _op_text(ops[idx])) for idx in run)
-        nj = _norm_txt(joined)
-        if len(nj) >= 8 and _matches_blob(nj, kill_blob, blob_drop,
-                                          _norm_txt_drop(joined),
-                                          blob_nodigit=blob_nodigit):
-            for idx in run:
-                raw = (op_uni[idx] if op_uni[idx] is not None
-                       else _op_text(ops[idx])).strip()
-                if raw and _norm_txt(raw) in keep_tokens:
-                    continue
-                dropped[idx] = True
+        # GREEDY SUB-RUN MATCH: the run may span several lines whose STREAM
+        # order differs from both blob orders (a bullet list drawn per char,
+        # columns interleaved). Consume the run left to right: keep extending
+        # a window while its joined text still matches the blob; when it stops
+        # matching, drop the matched prefix (if substantial) and restart.
+        texts = [(op_uni[idx] if op_uni[idx] is not None else _op_text(ops[idx]))
+                 for idx in run]
+        pos = 0
+        while pos < len(run):
+            acc = ""
+            last_ok = None
+            e = pos
+            while e < len(run):
+                cand = acc + texts[e]
+                nj = _norm_txt(cand)
+                if nj and not _matches_blob(nj, kill_blob, blob_drop,
+                                            _norm_txt_drop(cand),
+                                            blob_nodigit=blob_nodigit) \
+                        and len(nj) >= 8:
+                    break
+                acc = cand
+                if len(nj) >= 8 and _matches_blob(nj, kill_blob, blob_drop,
+                                                  _norm_txt_drop(cand),
+                                                  blob_nodigit=blob_nodigit):
+                    last_ok = e
+                e += 1
+            if last_ok is not None:
+                for m2 in range(pos, last_ok + 1):
+                    idx = run[m2]
+                    raw = texts[m2].strip()
+                    if raw and _norm_txt(raw) in keep_tokens:
+                        continue
+                    dropped[idx] = True
+                pos = last_ok + 1
+            else:
+                pos += 1
         k = j
     for i in text_idx:
         if dropped[i]: continue
