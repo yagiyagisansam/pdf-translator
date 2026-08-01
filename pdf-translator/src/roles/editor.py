@@ -64,13 +64,28 @@ def _merged_bands(obstacles):
     return out
 
 
+def _obstacle_figs(page):
+    """Figures that should block text placement. A figure covering (almost) the
+    whole page is a BACKGROUND (chapter-divider artwork, watermark, cover photo)
+    - the source prints its text on top of it, so we must too; treating it as an
+    obstacle leaves the page's text nowhere to go."""
+    pw = page.get("width") or 612.0
+    ph = page.get("height") or 792.0
+    out = []
+    for f in page.get("figures", []):
+        if (f["x1"] - f["x0"]) * (f["bottom"] - f["top"]) >= 0.8 * pw * ph:
+            continue
+        out.append(f)
+    return out
+
+
 def _obstacles_for(page, x0, x1):
     """(top, bottom) bands in [x0,x1] from figures + kept-language text + vector
     rules. Vector art is kept in place, so a horizontal rule (abstract-box border,
     section separator, table rule) that crosses this column becomes a small
     obstacle band the flow skips - Japanese is never drawn across a line."""
     obs = []
-    for f in page.get("figures", []):
+    for f in _obstacle_figs(page):
         if _overlaps(x0, x1, f["x0"], f["x1"]):
             obs.append((f["top"] - 6, f["bottom"] + 6))
     for b in page["blocks"]:
@@ -253,7 +268,7 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
             if b["x0"] > x0 + 1 and b.get("text", "").strip() and \
                     not (b["bottom"] <= u["_top"] + 1 or b["top"] >= bottom_est):
                 right = min(right, max(b["x0"] - 3, x0 + 12))
-        for f in page.get("figures", []):
+        for f in _obstacle_figs(page):
             if f["x0"] >= x1 - 1 and \
                     not (f["bottom"] <= u["_top"] + 1 or f["top"] >= bottom_est):
                 right = min(right, f["x0"] - 2)
@@ -278,7 +293,7 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
     # exemption, because a table row rule at the cell's edge must not push the
     # cell's first line out of its row
     bands = []
-    for f in page.get("figures", []):
+    for f in _obstacle_figs(page):
         if _overlaps(x0, x1, f["x0"], f["x1"]):
             bands.append((f["top"] - 6, f["bottom"] + 6))
     for b in page["blocks"]:

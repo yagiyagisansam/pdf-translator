@@ -49,6 +49,7 @@ def _char_segments(chars, gutter=None):
     # Without this the duplicates interleave by x and every word doubles
     # ("AIM AIM" -> "AAIIMM"), which poisons segmentation AND translation.
     seen = set()
+    recent = {}                        # text -> [(x0, top, adv)] of kept chars
     deduped = []
     for c in chars:
         qx = int(c["x0"] * 3)          # 1/3pt buckets; check both neighbours so
@@ -57,6 +58,23 @@ def _char_segments(chars, gutter=None):
                 for dx in (0, 1, -1) for dy in (0, 1, -1)]
         if any(k in seen for k in keys):
             continue
+        # OFFSET doubles: faux-bold re-draws a whole run shifted by up to ~2pt
+        # diagonally - too far for the buckets above. A real repeated letter
+        # ("ll") sits on the SAME baseline exactly one advance away, so a same-
+        # glyph neighbour with a vertical offset (or well under one advance
+        # horizontally) can only be a double-print.
+        adv = c["x1"] - c["x0"]
+        prev = recent.get(c["text"], [])
+        prev = [p for p in prev if p[1] >= c["top"] - 1.3]
+        dup = any(
+            (0.05 < abs(c["top"] - p[1]) <= 1.2 and abs(c["x0"] - p[0]) <= 2.0)
+            or (abs(c["top"] - p[1]) <= 0.05
+                and abs(c["x0"] - p[0]) <= 0.45 * max(adv, p[2]))
+            for p in prev)
+        if dup:
+            continue
+        prev.append((c["x0"], c["top"], adv))
+        recent[c["text"]] = prev
         seen.add(keys[0])
         deduped.append(c)
     chars = deduped
@@ -524,6 +542,12 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             # anywhere in the same visual row seals the line; a false seal on
             # prose is harmless (M2 re-merges it into the paragraph unit).
             if gap > 0.45 * page_text_w:
+                continue
+            # a row-mate at a WILDLY different size is page decoration (the
+            # 70pt chapter numeral beside a 24pt divider title), not a table
+            # cell - sealing the title would break its multi-line stitch
+            lsz, msz = l.get("size") or 0, m.get("size") or 0
+            if lsz and msz and max(lsz, msz) / min(lsz, msz) > 2.0:
                 continue
             if _numericish(m["text"]) or _row_rule_spans(l, m):
                 return "cell"

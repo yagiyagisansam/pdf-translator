@@ -911,9 +911,13 @@ def generate(name, src_path):
             for b in visible:
                 if overlaps_x(rb["x0"], rb["x1"], b["x0"], b["x1"]):
                     bands.append((b["top"] - 1.0, b["bottom"] + 1.0))
+            pw = p.get("width") or 612.0
+            ph = p.get("height") or 792.0
             for f in p.get("figures", []):
                 if id(f) in rb.get("on_figs", ()):
                     continue    # source text sat ON this figure - not an obstacle
+                if (f["x1"] - f["x0"]) * (f["bottom"] - f["top"]) >= 0.8 * pw * ph:
+                    continue    # full-page BACKGROUND art - source prints on it
                 if overlaps_x(rb["x0"], rb["x1"], f["x0"], f["x1"]):
                     bands.append((f["top"] - 8.0, f["bottom"] + 8.0))
             # vector rules (table borders, separators) stay in place - text must
