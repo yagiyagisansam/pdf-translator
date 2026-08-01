@@ -165,8 +165,12 @@ def _char_segments(chars, gutter=None):
             # appends (kerning grazes < ~0.5pt); a mid-line insert at a
             # different size is another element physically overlapping (a
             # box header over a ghost body line) - keep them separate.
-            if c["x0"] < s["x1"] - 0.6 and cs and ss and \
-                    max(cs, ss) / min(cs, ss) > 1.1:
+            # Punctuation/digits are exempt when SMALLER than the line: a
+            # colon or footnote mark from a different font run sits lower
+            # (later in top order) and must still join its own line.
+            if c["x0"] < s["x1"] - 0.6 and cs and ss and (
+                    cs / ss > 1.1
+                    or (ss / cs > 1.1 and c["text"].isalpha())):
                 continue
             gap = max(c["x0"] - s["x1"], s["x0"] - c["x1"], 0.0)
             # word spaces are ~0.5x char width; column/label gaps are far larger.
