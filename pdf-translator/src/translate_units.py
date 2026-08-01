@@ -304,6 +304,7 @@ def run(name: str, engine: str = "mock"):
                 cache[keys[i]] = results[i]
         json.dump(cache, open(cache_path, "w"), ensure_ascii=False)
 
+    import unicodedata as _ud
     for i, (u, masked_ja) in enumerate(zip(units, results)):
         if masked_ja:
             u["target_masked"] = masked_ja
@@ -314,6 +315,11 @@ def run(name: str, engine: str = "mock"):
         else:
             u["target_masked"] = None
             u["target"] = None  # unknown text: leave source untranslated
+        # NFC: the engine sometimes returns DECOMPOSED kana (ホ + combining
+        # dakuten); the subset font has no combining-mark glyph and the label
+        # renders as tofu. Compose before the font is subset from this file.
+        if u["target"]:
+            u["target"] = _ud.normalize("NFC", u["target"])
     json.dump(units, open(f"{OUT}/{name}_bilingual.json", "w"), ensure_ascii=False, indent=1)
     n = sum(1 for u in units if u.get("target"))
     print(f"[{name}] engine={engine} translated {n}/{len(units)} units "

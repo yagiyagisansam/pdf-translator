@@ -281,7 +281,7 @@ def _decode_op(op, cur_font, decoders):
 def keep_tokens_for(p, pi, unit_for_block):
     """Normalized tokens of everything that STAYS on page pi (kept-type blocks
     and untranslated text) - the fragment sweep must never delete these."""
-    trans = {"body", "heading", "caption", "title"}
+    trans = {"body", "heading", "caption", "title", "label"}
     toks = set()
     for bi, b in enumerate(p["blocks"]):
         if b["type"] in trans and f"{pi}:{bi}" in unit_for_block:
@@ -551,8 +551,18 @@ def _wrap(text, font, size, max_w):
                 brk = len(cur)
             cur += ch; cur_w += w
             continue
-        # overflow - kinsoku first: closing punctuation hangs on this line
+        # overflow - kinsoku first (行頭禁則). 追い出し: push the previous
+        # char down together with the forbidden head char, so the line never
+        # exceeds max_w - hanging it past the edge (ぶら下がり) bled into
+        # same-row neighbours ("グリーンフィルター" over the next header).
+        # Only when the line would become empty does the char hang instead.
         if ch in _KINSOKU_HEAD:
+            if len(cur) >= 2:
+                lines.append(cur[:-1])
+                cur = cur[-1] + ch
+                cur_w = W(cur[0]) + w
+                brk = -1
+                continue
             lines.append(cur + ch); cur = ""; cur_w = 0.0; brk = -1
             continue
         # break at the last word boundary when we are inside an ASCII word,
@@ -707,7 +717,7 @@ def generate(name, src_path):
     for u in units:
         if not u.get("target"): continue
         for sid in u["spans"]: unit_for_block[sid]=u
-    TRANS={"body","heading","caption","title"}
+    TRANS={"body","heading","caption","title","label"}
 
     def overlaps_x(a0, a1, b0, b1):
         return not (a1 <= b0 + 1 or b1 <= a0 + 1)

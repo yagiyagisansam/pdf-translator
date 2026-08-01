@@ -28,7 +28,7 @@ adds the lane geometry.
 import m1_analyze
 from config import OUT
 
-TRANSLATABLE = {"body", "heading", "caption", "title"}
+TRANSLATABLE = {"body", "heading", "caption", "title", "label"}
 # Text that stays as-is in the output and therefore blocks Japanese reflow.
 KEPT_TEXT = {"data", "reference", "running_head", "pagenum"}
 

@@ -310,14 +310,47 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
     # cascades down into the next box's area and the boxes' texts pile up.
     # Shrink (bounded - readability floor and 62% of source) until the
     # wrapped height roughly matches the source height, THEN flow.
-    _w0 = max(12.0, x1 - x0)
     _src_sz = u.get("_size") or size
     _src_h = max(1, u.get("_nlines", 1)) * _src_sz * 1.3 + 2
     _floor = max(4.6, 0.62 * _src_sz)
-    while size > _floor and \
+
+    def _shrunk(width):
+        s = _unit_size(u, factor)
+        while s > _floor and \
+                len(m3._wrap(u["target"], font, s, width)) * s * LR \
+                > _src_h * 1.15:
+            s -= 0.25
+        return s
+
+    # a Japanese line can run a hair wider than its English box - clamp at a
+    # same-row neighbour that starts inside/just right of this box, so two
+    # column headers ("Green Filter" | "Green & Blue Filter") never graze
+    _row_bot = u["_top"] + _src_h + 2
+    for b in page["blocks"]:
+        if b["x0"] > x0 + 6 and b["x0"] < x1 + 6 and \
+                b.get("text", "").strip() and \
+                not (b["bottom"] <= u["_top"] - 1 or b["top"] >= _row_bot):
+            x1 = min(x1, max(b["x0"] - 2, x0 + 12))
+    _w0 = max(12.0, x1 - x0)
+    size = _shrunk(_w0)
+    if u.get("_label") and size <= _floor + 0.26 and \
             len(m3._wrap(u["target"], font, size, _w0)) * size * LR \
-            > _src_h * 1.15:
-        size -= 0.25
+            > _src_h * 1.3:
+        # a Japanese label can be WIDER than its English box (a katakana
+        # legend entry): before accepting fragment-wrapping at the floor
+        # size, widen rightward - clamped at the nearest element and 2.5x
+        # the source width - and re-fit
+        bottom_est = u["_top"] + _src_h + 4
+        lim = min(page["width"] * 0.97, x0 + 2.5 * max(_w0, 10.0))
+        for b in page["blocks"]:
+            if b["x0"] > x1 + 1 and b.get("text", "").strip() and \
+                    not (b["bottom"] <= u["_top"] - 1
+                         or b["top"] >= bottom_est):
+                lim = min(lim, max(b["x0"] - 3, x0 + 12))
+        if lim > x0 + _w0 + 4:
+            x1 = lim
+            _w0 = max(12.0, x1 - x0)
+            size = _shrunk(_w0)
     lh = size * LR
     # figures and KEPT TEXT are real obstacles always (a margin icon's badge
     # word must never be overdrawn); only RULE bands get the thin-band
@@ -388,7 +421,10 @@ def _layout_page(page, page_units, factor, font_of):
     flow_units, margin_units = [], []
     for u in page_units:
         ov = min(u["_x1"], g["Lx1"]) - max(u["_x0"], g["Lx0"])
-        if u.get("_record") or ov < 0.3 * max(u["_x1"] - u["_x0"], 1.0):
+        # figure-internal labels always keep their own box: they belong to a
+        # diagram at an exact spot, never to the page's reading flow
+        if u.get("_record") or u.get("_label") or \
+                ov < 0.3 * max(u["_x1"] - u["_x0"], 1.0):
             margin_units.append(u)
         else:
             flow_units.append(u)
@@ -543,6 +579,7 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
             frag["_top"] = blk.get("top", 0.0)
             frag["_color"] = blk.get("color")
             frag["_record"] = bool(blk.get("record"))
+            frag["_label"] = blk.get("type") == "label"
             frag["_nlines"] = blk.get("nlines", 1)
             frag["_size"] = _st.median(bs) if bs else \
                 (layout["pages"][fpi].get("body_size") or 10)

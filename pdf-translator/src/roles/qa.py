@@ -39,7 +39,7 @@ from config import OUT
 PLACEHOLDER_RE = re.compile(r"⟦T\d+⟧|⟦\?⟧")
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z\-']{3,}")
 _LIG = {"ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl"}
-TRANS = {"body", "heading", "caption", "title"}
+TRANS = {"body", "heading", "caption", "title", "label"}
 
 
 def _norm(s):

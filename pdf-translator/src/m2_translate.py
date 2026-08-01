@@ -124,7 +124,7 @@ def restore(text, mapping):
     return text
 
 # ---- build translation units ------------------------------------------------
-TRANSLATABLE = {"body", "heading", "caption", "title"}
+TRANSLATABLE = {"body", "heading", "caption", "title", "label"}
 
 
 # a real word: Capitalized/lowercase run of 3+ letters, or a 3+ letter acronym.
@@ -274,6 +274,11 @@ def build_units(layout):
                 # are independent items: the lowercase-continuation heuristic
                 # would chain the whole column into one run-on unit
                 if pb.get("list") or nb.get("list"):
+                    break
+                # a FIGURE-INTERNAL LABEL (bubble caption, legend entry) is a
+                # standalone element drawn strictly in place - never chained
+                # into a paragraph with its neighbours
+                if pb["type"] == "label" or nb["type"] == "label":
                     break
                 flag_link = pb.get("continues_to_next_page") and nb.get("continues_from_prev_page")
                 if flag_link or _continues(pb["text"], nb["text"], nb["type"]):
