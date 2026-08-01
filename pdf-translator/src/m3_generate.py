@@ -445,6 +445,27 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         if raw_i and _norm_txt(raw_i) in keep_tokens:
             continue
         k=pos[i]
+        # SEAM TAIL/HEAD: the op is the torn end of a word whose main op was
+        # dropped ("Operato"|"r"): joined with the dropped neighbour it
+        # matches the blob even though the fragment alone never can
+        if k-1 >= 0 and dropped[text_idx[k-1]]:
+            pt=(op_uni[text_idx[k-1]] if op_uni[text_idx[k-1]] is not None
+                else _op_text(ops[text_idx[k-1]]))
+            nj=_norm_txt(pt+raw_i)
+            if len(nj) >= 4 and _matches_blob(nj, kill_blob, blob_drop,
+                                              _norm_txt_drop(pt+raw_i),
+                                              blob_nodigit=blob_nodigit):
+                dropped[i]=True
+                continue
+        if k+1 < len(text_idx) and dropped[text_idx[k+1]]:
+            nt=(op_uni[text_idx[k+1]] if op_uni[text_idx[k+1]] is not None
+                else _op_text(ops[text_idx[k+1]]))
+            nj=_norm_txt(raw_i+nt)
+            if len(nj) >= 4 and _matches_blob(nj, kill_blob, blob_drop,
+                                              _norm_txt_drop(raw_i+nt),
+                                              blob_nodigit=blob_nodigit):
+                dropped[i]=True
+                continue
         # Scan left/right SKIPPING over consecutive fragment ops to the nearest
         # NON-fragment text op. Drop this fragment only if the body text bounding
         # its run was itself dropped on BOTH sides - i.e. it is wedged inside a

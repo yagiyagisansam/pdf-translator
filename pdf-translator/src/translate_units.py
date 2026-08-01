@@ -73,8 +73,14 @@ def _sentence_translate(translator, unit, item):
                 _digits_ok([unit["tokens"].get(k, "") for k in keys], o2):
             outs.append(o2)
             continue
-        return None
-    return " ".join(outs)
+        # THIS sentence resists translation (the engine keeps dropping one of
+        # its numbers): keep it in ENGLISH with its literal values restored.
+        # One English sentence inside a Japanese paragraph beats failing the
+        # whole unit back to English (numbers stay verbatim either way).
+        outs.append(q)
+    joined = " ".join(outs)
+    # if the salvage left the unit MOSTLY English it is no translation at all
+    return None if _echoish(joined) else joined
 
 
 def _placeholders_ok(masked_src: str, masked_ja: str) -> bool:
@@ -232,7 +238,10 @@ def run(name: str, engine: str = "mock"):
             repaired = set()
             for i in list(miss):
                 out = results[i]
-                if not out or _placeholders_ok(items[i]["text"], out):
+                # empty results ENTER the loop too - its first branch retries
+                # them (a transient engine blank otherwise died silently here,
+                # skipping both repair and the unmasked fallback below)
+                if out and _placeholders_ok(items[i]["text"], out):
                     continue
                 # progressive inlining: each round inlines whatever tokens the
                 # engine dropped LAST time and retries - drops are sporadic, so
@@ -276,8 +285,9 @@ def run(name: str, engine: str = "mock"):
                         print(f"[{name}] unit {units[i]['uid']}: repaired "
                               f"sentence-by-sentence", file=sys.stderr)
             still = [i for i in miss
-                     if i not in repaired and results[i]
-                     and not _placeholders_ok(items[i]["text"], results[i])]
+                     if i not in repaired
+                     and (not results[i]
+                          or not _placeholders_ok(items[i]["text"], results[i]))]
             for i in still:
                 results[i] = None
             # last resort for engines that allow it (google): translate the
