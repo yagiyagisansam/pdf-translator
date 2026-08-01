@@ -656,9 +656,25 @@ def _is_flowing_doc(layout):
 
 def build(name, src_path, floor=6.0):
     ensure_out()
-    m3._register_fonts()
     layout = json.load(open(f"{OUT}/{name}_layout.json"))
     units = json.load(open(f"{OUT}/{name}_bilingual.json"))
+    # SELF-HEAL the subset font before registering: the OUT dir is shared, so
+    # another document's run (or a stale build) may have overwritten
+    # NotoJP-sub.ttf with a subset that lacks THIS document's characters -
+    # reportlab then writes code 0 for them and the PDF shows tofu boxes.
+    # Rebuilding is cheap (~2s) and only happens when a char is missing.
+    try:
+        from fontTools.ttLib import TTFont as _FT
+        cover = set(_FT(f"{OUT}/NotoJP-sub.ttf").getBestCmap().keys())
+        need = {ord(ch) for u in units if u.get("target")
+                for ch in u["target"] if ord(ch) > 127}
+        stale = bool(need - cover)
+    except Exception:
+        stale = True
+    if stale:
+        from config import make_jp_font_for
+        make_jp_font_for(name)
+    m3._register_fonts()
     m3.sanitize_targets(units)   # no-glyph chars (dingbats) -> visible bullet
 
     # Slide decks (any landscape page) and poster/brochure-style documents don't

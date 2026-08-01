@@ -101,8 +101,21 @@ def _char_segments(chars, gutter=None):
         dup = False
         for (px0, ptop, psz) in kept_runs.get(key, ()):
             ratio = max(rsz, psz) / max(min(rsz, psz), 0.1)
-            if 1.02 <= ratio <= 1.35 and abs(r["x0"] - px0) <= 8.0 and \
-                    abs(r["top"] - ptop) <= 1.8 * max(rsz, psz):
+            dx = abs(r["x0"] - px0)
+            dy = abs(r["top"] - ptop)
+            if dx > 8.0:
+                continue
+            # scaled copy: sizes differ a little, offset up to ~2 line pitches
+            if 1.02 <= ratio <= 1.35 and dy <= 1.8 * max(rsz, psz):
+                dup = True
+                break
+            # SAME-SIZE shadow copy (PowerPoint text shadow): identical text a
+            # hair away. A real repeated line (a table's recurring cell) sits
+            # a full row pitch below (dy >= ~1x size) - excluded by the tight
+            # dy window; a same-line repeated word sits >8pt right - excluded
+            # by the dx cap.
+            if ratio < 1.02 and dy <= 0.6 * max(rsz, psz) and \
+                    (dx > 0.05 or dy > 0.05):
                 dup = True
                 break
         if dup:

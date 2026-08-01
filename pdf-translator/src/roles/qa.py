@@ -150,6 +150,25 @@ def review(name, editor_report):
         defects.append({"role": "translator", "kind": "placeholder_leak",
                         "detail": f"unrestored ⟦Tn⟧ in units {leaked[:8]}",
                         "param": "reengine"})
+    # TOFU gate: every non-ASCII char the editor drew must exist in the
+    # embedding subset font, or the reader sees a notdef box where a kanji
+    # belongs (a stale shared subset file caused exactly this)
+    try:
+        from fontTools.ttLib import TTFont as _FT
+        cover = set(_FT(f"{OUT}/NotoJP-sub.ttf").getBestCmap().keys())
+        tofu = set()
+        for lines in placed.values():
+            for ln in lines:
+                for ch in ln.get("text", ""):
+                    if ord(ch) > 127 and ord(ch) not in cover:
+                        tofu.add(ch)
+        if tofu:
+            defects.append({"role": "editor", "kind": "missing_glyph",
+                            "detail": "font subset lacks drawn chars: "
+                                      + "".join(sorted(tofu))[:40],
+                            "param": "restrip"})
+    except Exception:
+        pass
 
     ref_pages = set()
     for p in layout["pages"]:
