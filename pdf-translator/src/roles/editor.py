@@ -268,6 +268,10 @@ def _flow_units_lshape(units, x0, width, y, y_bottom, ybands, boxes, factor,
         if draws:
             gap = HEAD_GAP if u["type"] in ("heading", "title") else PARA_GAP
             y += lh * max(1, round(gap))
+        # VERTICAL ANCHOR per unit: never start above the unit's own source
+        # top - Japanese that ran short must not pull later sections upward
+        # (a TOC's sub-entries migrating above their own heading)
+        y = max(y, u.get("_top", y))
         is_head = u["type"] in ("heading", "title")
         remaining = text
         while remaining:
