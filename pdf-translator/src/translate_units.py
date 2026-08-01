@@ -23,6 +23,22 @@ PLACEHOLDER_RE = re.compile(r"⟦T(\d+)⟧")
 CACHE_PATH_TMPL = "{out}/translation_cache.json"
 
 
+def _looks_japanese(s: str) -> bool:
+    return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" or "｡" <= c <= "ﾟ"
+               for c in s or "")
+
+
+def _echoish(s: str) -> bool:
+    """True when a 'translation' is mostly untranslated Latin text - a full or
+    partial ENGLISH ECHO from the free endpoint (it returns the input, or
+    translates only some sentences). Accepting one strips the original English
+    and redraws the same English as 'Japanese'."""
+    if not s:
+        return False
+    latin = sum(c.isascii() and c.isalpha() for c in s)
+    return latin > 0.45 * max(len(s), 1)
+
+
 def _placeholders_ok(masked_src: str, masked_ja: str) -> bool:
     """The translation must contain exactly the placeholders of the source
     (order-free): a lost ⟦Tn⟧ silently drops a number/citation on restore."""
@@ -72,6 +88,13 @@ def run(name: str, engine: str = "mock"):
     cache = _load_cache(cache_path)
     keys = [_cache_key(engine, it) for it in items]
     results = [cache.get(k) for k in keys]
+    if engine != "mock":
+        # cached entries written before the echo guard existed may hold
+        # English echoes / half-translated text - retranslate those
+        from m2_translate import _has_words
+        for i, r in enumerate(results):
+            if r and _echoish(r) and _has_words(units[i]["source"]):
+                results[i] = None
 
     # TOKEN-ONLY units ("July 16, 2026" masked to a single ⟦T0⟧, a bare URL, a
     # model number line): there is nothing for an engine to translate, and free
@@ -104,6 +127,15 @@ def run(name: str, engine: str = "mock"):
         for i, r in zip(miss, fresh):
             results[i] = r
         if validate:
+            # an ENGLISH ECHO (the endpoint returning its input, fully or per
+            # sentence) is a failure, not a translation: without this it gets
+            # accepted, the original is stripped, and the same English is
+            # redrawn as "Japanese"
+            from m2_translate import _has_words
+            for i in miss:
+                if results[i] and _echoish(results[i]) \
+                        and _has_words(units[i]["source"]):
+                    results[i] = None
             # one retry for units the engine returned NOTHING for (free
             # endpoints intermittently return an empty translation) - a second
             # attempt usually succeeds and an English paragraph left behind is
@@ -135,7 +167,11 @@ def run(name: str, engine: str = "mock"):
                 outs = _safe_batch(translator.translate_batch,
                                    [{"text": p, "kind": items[i]["kind"]}
                                     for p in parts if p.strip()])
-                if outs and all(o for o in outs):
+                # every substantial piece must actually be JAPANESE - the free
+                # endpoint sometimes ECHOES the English back, and accepting an
+                # echo produces a half-translated mixed-language paragraph
+                if outs and all(o for o in outs) and \
+                        all(_looks_japanese(o) or len(o) < 12 for o in outs):
                     results[i] = " ".join(outs)
                     print(f"[{name}] unit {units[i]['uid']}: translated in "
                           f"{len(outs)} sentence pieces", file=sys.stderr)
@@ -156,29 +192,39 @@ def run(name: str, engine: str = "mock"):
             # we can verify - far better than dumping the whole paragraph back
             # to English because one ⟦Tn⟧ went missing.
             tok_re = re.compile(r"⟦T\d+⟧")
+            repaired = set()
             for i in list(miss):
                 out = results[i]
                 if not out or _placeholders_ok(items[i]["text"], out):
                     continue
-                need = set(tok_re.findall(items[i]["text"]))
-                got = set(tok_re.findall(out))
-                missing, extra = need - got, got - need
-                if not missing or extra or len(missing) > 4:
-                    continue
+                # progressive inlining: each round inlines whatever tokens the
+                # engine dropped LAST time and retries - drops are sporadic, so
+                # the set of surviving tokens grows until the round-trip closes
                 txt = items[i]["text"]
                 vals = []
-                for k in sorted(missing):
-                    v = units[i]["tokens"].get(k, "")
-                    txt = txt.replace(k, v)
-                    vals.append(v)
-                out2 = _safe_batch(translator.translate_batch,
-                                   [{"text": txt, "kind": items[i]["kind"]}])[0]
-                if out2 and _placeholders_ok(txt, out2) and _digits_ok(vals, out2):
-                    results[i] = out2
-                    print(f"[{name}] unit {units[i]['uid']}: repaired by inlining "
-                          f"{len(vals)} dropped token(s)", file=sys.stderr)
+                for _ in range(3):
+                    need = set(tok_re.findall(txt))
+                    got = set(tok_re.findall(out or ""))
+                    missing, extra = need - got, got - need
+                    if extra or len(missing) > 6:
+                        break
+                    if not missing:
+                        if out and _digits_ok(vals, out):
+                            results[i] = out
+                            repaired.add(i)
+                            print(f"[{name}] unit {units[i]['uid']}: repaired by "
+                                  f"inlining {len(vals)} dropped token(s)",
+                                  file=sys.stderr)
+                        break
+                    for k in sorted(missing):
+                        v = units[i]["tokens"].get(k, "")
+                        txt = txt.replace(k, v)
+                        vals.append(v)
+                    out = _safe_batch(translator.translate_batch,
+                                      [{"text": txt, "kind": items[i]["kind"]}])[0]
             still = [i for i in miss
-                     if results[i] and not _placeholders_ok(items[i]["text"], results[i])]
+                     if i not in repaired and results[i]
+                     and not _placeholders_ok(items[i]["text"], results[i])]
             for i in still:
                 results[i] = None
             # last resort for engines that allow it (google): translate the

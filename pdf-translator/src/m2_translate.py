@@ -53,7 +53,14 @@ PROTECT_PATTERNS = [
     # ("HIGE" -> beard). Domain constants, not per-document tuning.
     ("ABBR",  re.compile(r"\b(?:CMVJ|SPJ|AFTE|SPAD|NAMI|NASA|ICC|ES|QA|AVT|3D|"
                          r"ISA|VFR|IFR|FAA|EASA|HIGE|HOGE|OEI|MGW|MCP|IGE|OGE|"
-                         r"NVG|AFCS|HUMS|SAR|FADEC|SATCOM|MoD)\b")),
+                         r"NVG|AFCS|HUMS|SAR|FADEC|SATCOM|MoD|"
+                         # finance/IR constants a literal MT engine mangles
+                         # ("ROE" -> roe -> 魚卵). Domain constants, not
+                         # per-document tuning.
+                         r"ROE|ROA|ROI|ROIC|EPS|EBITDA|EBIT|CAPEX|OPEX|FCF|"
+                         r"YoY|QoQ|GAAP|IFRS|NTD|TWD|USD|EUR|JPY|CAGR)\b")),
+    # quarter/half notation (2Q26, 1H26, 4Q25) - not a number, not a word
+    ("QTR",   re.compile(r"\b[1-4][QH]\d{2}(?![0-9])")),
     # product/model designators (AW101, EH101, CT7-8E, UK24 ...): keep verbatim so
     # no engine can transliterate or split them
     ("MODEL", re.compile(r"\b[A-Z]{1,5}\d{1,4}(?:-\d+[A-Z]*|-[A-Z]+\d*)?\b")),
@@ -124,7 +131,9 @@ TRANSLATABLE = {"body", "heading", "caption", "title"}
 # Rejects figure debris like ".t...tItI." (weird-case runs) and dot leaders,
 # while keeping "NDB", "Box", "Nondirectional" - so a TOC row with a long dot
 # leader still translates but tick-label junk never does.
-_WORD_OK = re.compile(r"\b(?:[A-Za-z][a-z]{2,}|[A-Z]{3,})\b")
+# the extra [a-z]{3,} alternative catches CamelCase glued by tight kerning
+# ("LatinAmerica" extracts with no space and has no \b-delimited word)
+_WORD_OK = re.compile(r"\b(?:[A-Za-z][a-z]{2,}|[A-Z]{3,})\b|[a-z]{3,}")
 
 
 def _has_words(text):
