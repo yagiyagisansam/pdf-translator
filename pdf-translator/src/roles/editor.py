@@ -388,7 +388,10 @@ def _layout_page(page, page_units, factor, font_of):
     flow_units, margin_units = [], []
     for u in page_units:
         ov = min(u["_x1"], g["Lx1"]) - max(u["_x0"], g["Lx0"])
-        if u.get("_record") or ov < 0.3 * max(u["_x1"] - u["_x0"], 1.0):
+        # figure-internal labels always keep their own box: they belong to a
+        # diagram at an exact spot, never to the page's reading flow
+        if u.get("_record") or u.get("_label") or \
+                ov < 0.3 * max(u["_x1"] - u["_x0"], 1.0):
             margin_units.append(u)
         else:
             flow_units.append(u)
@@ -543,6 +546,7 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
             frag["_top"] = blk.get("top", 0.0)
             frag["_color"] = blk.get("color")
             frag["_record"] = bool(blk.get("record"))
+            frag["_label"] = blk.get("type") == "label"
             frag["_nlines"] = blk.get("nlines", 1)
             frag["_size"] = _st.median(bs) if bs else \
                 (layout["pages"][fpi].get("body_size") or 10)

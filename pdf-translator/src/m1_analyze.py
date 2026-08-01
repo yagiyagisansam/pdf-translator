@@ -15,6 +15,7 @@ TYPE_COLORS = {
     "body":        (30, 90, 220),
     "caption":     (20, 160, 60),
     "figure":      (200, 30, 200),
+    "label":       (255, 60, 120),
     "running_head":(130, 130, 130),
     "pagenum":     (130, 130, 130),
     "reference":   (0, 150, 160),
@@ -1091,9 +1092,14 @@ def analyze_pdf(path, name, render=True):
                 figs.append({"type": "figure", "col": 0, "vector": True,
                              "x0": bx[0], "x1": bx[2], "top": bx[1],
                              "bottom": bx[3], "text": "", "order": None})
-            # small text sitting inside a vector diagram is figure content -
-            # incl. chart titles and source notes (multi-line but small type):
-            # translating them draws Japanese over the chart's own lettering
+            # small text sitting inside a vector diagram is figure content.
+            # SHORT WORD LABELS (a bubble-chart circle's caption, a legend
+            # entry) become `label`: translated and drawn strictly IN PLACE
+            # inside their own bbox (shrink-to-fit, never reflowed) - the
+            # diagram is unreadable in Japanese if its labels stay English.
+            # Everything else (axis ticks, units, long source notes) stays
+            # `data`: numbers carry no language, and translating dense chart
+            # lettering risks drawing Japanese over the artwork.
             for b in blocks:
                 if b["type"] not in ("body", "heading", "caption") or \
                         (b.get("size") or 0) > body_size * 1.15 or \
@@ -1108,8 +1114,51 @@ def analyze_pdf(path, name, render=True):
                     ix = max(0.0, min(b["x1"], f["x1"]) - max(b["x0"], f["x0"]))
                     iy = max(0.0, min(b["bottom"], f["bottom"]) - max(b["top"], f["top"]))
                     if ix * iy >= 0.7 * ba:
-                        b["type"] = "data"
+                        t = b["text"].strip()
+                        if len(t) <= 120 and re.search(r"[A-Za-z]{3,}", t) \
+                                and not _numericish(t):
+                            b["type"] = "label"
+                            b["label"] = True
+                        else:
+                            b["type"] = "data"
                         break
+            # a circle/panel caption often arrives as a STACK of 1-line blocks
+            # ("Bank holding" / "companies"): merge same-stack label blocks
+            # (x-centered on each other, one line pitch apart) into one block
+            # so the caption translates as ONE phrase, not word fragments.
+            # Legend rows don't merge: their vertical spacing is wider than a
+            # line pitch. A trailing hyphen joins without a space
+            # ("State-" + "chartered" -> "State-chartered").
+            labs = sorted((b for b in blocks if b["type"] == "label"),
+                          key=lambda b: (b["top"], b["x0"]))
+            for i, a in enumerate(labs):
+                if a.get("_absorbed"):
+                    continue
+                for c in labs[i + 1:]:
+                    if c.get("_absorbed"):
+                        continue
+                    sa = a.get("size") or 8.0
+                    sc = c.get("size") or sa
+                    if max(sa, sc) / max(min(sa, sc), 0.1) > 1.2:
+                        continue
+                    gap = c["top"] - a["bottom"]
+                    if gap > 0.7 * max(sa, sc) or gap < -2.0:
+                        continue
+                    ctr_a = (a["x0"] + a["x1"]) / 2
+                    ctr_c = (c["x0"] + c["x1"]) / 2
+                    ox = min(a["x1"], c["x1"]) - max(a["x0"], c["x0"])
+                    if abs(ctr_a - ctr_c) > max(8.0, 1.5 * sa) or \
+                            ox < 0.3 * min(a["x1"] - a["x0"], c["x1"] - c["x0"]):
+                        continue
+                    j = "" if a["text"].rstrip().endswith("-") else " "
+                    a["text"] = a["text"].rstrip() + j + c["text"].strip()
+                    a["x0"] = min(a["x0"], c["x0"])
+                    a["x1"] = max(a["x1"], c["x1"])
+                    a["bottom"] = max(a["bottom"], c["bottom"])
+                    a["nlines"] = a.get("nlines", 1) + c.get("nlines", 1)
+                    c["_absorbed"] = True
+            if any(b.get("_absorbed") for b in labs):
+                blocks = [b for b in blocks if not b.get("_absorbed")]
         rules = page_rules
         # drop TEXT UNDERLINES (link underlines, struck text): a rule lying
         # inside a text block's bbox belongs to the text, not the page

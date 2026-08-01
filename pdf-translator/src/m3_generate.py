@@ -281,7 +281,7 @@ def _decode_op(op, cur_font, decoders):
 def keep_tokens_for(p, pi, unit_for_block):
     """Normalized tokens of everything that STAYS on page pi (kept-type blocks
     and untranslated text) - the fragment sweep must never delete these."""
-    trans = {"body", "heading", "caption", "title"}
+    trans = {"body", "heading", "caption", "title", "label"}
     toks = set()
     for bi, b in enumerate(p["blocks"]):
         if b["type"] in trans and f"{pi}:{bi}" in unit_for_block:
@@ -707,7 +707,7 @@ def generate(name, src_path):
     for u in units:
         if not u.get("target"): continue
         for sid in u["spans"]: unit_for_block[sid]=u
-    TRANS={"body","heading","caption","title"}
+    TRANS={"body","heading","caption","title","label"}
 
     def overlaps_x(a0, a1, b0, b1):
         return not (a1 <= b0 + 1 or b1 <= a0 + 1)
