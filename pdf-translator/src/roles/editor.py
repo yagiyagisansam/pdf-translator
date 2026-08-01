@@ -184,6 +184,120 @@ def _unit_lines(units, factor, width, font_of):
     return out
 
 
+def _obstacle_geo(page, x0, x1, taken):
+    """(ybands, boxes) for the L-SHAPED flow. Rules cut the full lane width
+    (a table border must never have text straddle it); figures, kept text and
+    margin-unit rects block only their OWN x-range, so body text can continue
+    BESIDE a photo the way the source magazine/book layout does."""
+    boxes = []
+    for f in _obstacle_figs(page):
+        if _overlaps(x0, x1, f["x0"], f["x1"]):
+            boxes.append((f["x0"] - 4, f["x1"] + 4, f["top"] - 4,
+                          f["bottom"] + 4))
+    for b in page["blocks"]:
+        if (b["type"] in KEPT or b.get("_keep_en")) and \
+                _overlaps(x0, x1, b["x0"], b["x1"]):
+            if _badge_like(b):
+                boxes.append((b["x0"] - 6, b["x1"] + 6, b["top"] - 14,
+                              b["bottom"] + 8))
+            else:
+                boxes.append((b["x0"] - 2, b["x1"] + 2, b["top"] - 2,
+                              b["bottom"] + 2))
+    ybands = []
+    for r in page.get("rules", []):
+        if _overlaps(x0, x1, r["x0"], r["x1"]):
+            ybands.append((r["top"] - 3, r["bottom"] + 3))
+    for (tx0, tx1, tt, tb) in taken:
+        if not (tx1 <= x0 or tx0 >= x1):
+            boxes.append((tx0, tx1, tt, tb))
+    return _merged_bands(ybands), boxes
+
+
+def _flow_units_lshape(units, x0, width, y, y_bottom, ybands, boxes, factor,
+                       font_of):
+    """Flow units down the lane, NARROWING around partial-width obstacles: in
+    a band where a photo covers only part of the lane, lines are wrapped at
+    the remaining width beside it (magazine wrap) instead of skipping the
+    whole band - the fix for book pages whose text hugs the pictures.
+    Returns (draws, y_end, leftover_line_count)."""
+    draws = []
+    lane_x1 = x0 + width
+    min_w = max(80.0, 0.30 * width)
+
+    def free_at(yy, lh):
+        cut = [(max(bx0, x0), min(bx1, lane_x1))
+               for (bx0, bx1, t, b) in boxes
+               if yy < b and yy + lh > t and bx0 < lane_x1 and bx1 > x0]
+        if not cut:
+            return x0, width, None
+        cut.sort()
+        occ = []
+        for a, b2 in cut:
+            if occ and a <= occ[-1][1] + 1:
+                occ[-1] = (occ[-1][0], max(occ[-1][1], b2))
+            else:
+                occ.append((a, b2))
+        frees = []
+        prev = x0
+        for a, b2 in occ:
+            if a - prev > 1:
+                frees.append((prev, a - prev))
+            prev = max(prev, b2)
+        if lane_x1 - prev > 1:
+            frees.append((prev, lane_x1 - prev))
+        best = max(frees, key=lambda f: f[1]) if frees else None
+        if best is None or best[1] < min_w:
+            nb = min(b for (bx0, bx1, t, b) in boxes
+                     if yy < b and yy + lh > t and bx0 < lane_x1 and bx1 > x0)
+            return None, None, nb
+        return best[0], best[1], None
+
+    leftover = 0
+    dead = False
+    for k, u in enumerate(units):
+        text = u.get("target")
+        if not text:
+            continue
+        font = font_of(u)
+        color = tuple(u.get("_color") or (0, 0, 0))
+        size = _unit_size(u, factor)
+        lh = size * LR
+        if dead:
+            leftover += len(m3._wrap(text, font, size, max(10.0, width)))
+            continue
+        if draws:
+            gap = HEAD_GAP if u["type"] in ("heading", "title") else PARA_GAP
+            y += lh * max(1, round(gap))
+        is_head = u["type"] in ("heading", "title")
+        remaining = text
+        while remaining:
+            while True:
+                hit = next(((t, b) for (t, b) in ybands
+                            if y < b and y + lh > t), None)
+                if hit is None:
+                    break
+                y = hit[1]
+            if y + lh > y_bottom + 0.1:
+                leftover += len(m3._wrap(remaining, font, size,
+                                         max(10.0, width)))
+                dead = True
+                break
+            fx, fw, nb = free_at(y, lh)
+            if fx is None:
+                y = nb
+                continue
+            wl = m3._wrap(remaining, font, size, fw)
+            ln = wl[0]
+            rest = m3._remaining_after(remaining, [ln])
+            draws.append({"x": fx, "y_top": y, "size": size, "font": font,
+                          "line": ln, "width": fw,
+                          "justify": bool(rest) and not is_head,
+                          "color": color})
+            y += lh
+            remaining = rest
+    return draws, y, leftover
+
+
 def _capacity(y, y_bottom, bands, lh):
     """How many lines of height lh fit from y to y_bottom, skipping obstacles."""
     n = 0
@@ -456,10 +570,12 @@ def _layout_page(page, page_units, factor, font_of):
         band_top = min((u.get("_top", y) for u in units_in_band), default=y)
         y = max(y, band_top)
         if kind == "full":
-            lines = _unit_lines(payload, factor, g["Lx1"] - g["Lx0"], font_of)
-            d, y, rem = _flow_column(lines, g["Lx0"], g["Lx1"] - g["Lx0"], y,
-                                     g["bottom"], full_obs)
-            draws += d; overflow += len(rem); y += lh_page * PARA_GAP
+            ybands, boxes = _obstacle_geo(page, g["Lx0"], g["Lx1"], taken)
+            d, y, rem = _flow_units_lshape(payload, g["Lx0"],
+                                           g["Lx1"] - g["Lx0"], y,
+                                           g["bottom"], ybands, boxes,
+                                           factor, font_of)
+            draws += d; overflow += rem; y += lh_page * PARA_GAP
         else:
             # Newspaper-style balanced two-column flow: combine BOTH lanes in
             # reading order into one stream, fill the LEFT column top-to-bottom
@@ -475,10 +591,12 @@ def _layout_page(page, page_units, factor, font_of):
                 if col is None:
                     overflow += len(units); continue
                 w = col["x1"] - col["x0"]
-                lines = _unit_lines(units, factor, w, font_of)
-                bands = obs_for(col["x0"], col["x1"])
-                d, y, rem = _flow_column(lines, col["x0"], w, y, g["bottom"], bands)
-                draws += d; overflow += len(rem); y = g["bottom"] + lh_page * PARA_GAP
+                ybands, boxes = _obstacle_geo(page, col["x0"], col["x1"],
+                                              taken)
+                d, y, rem = _flow_units_lshape(units, col["x0"], w, y,
+                                               g["bottom"], ybands, boxes,
+                                               factor, font_of)
+                draws += d; overflow += rem; y = g["bottom"] + lh_page * PARA_GAP
                 continue
             wL, wR = L["x1"] - L["x0"], R["x1"] - R["x0"]
             if min(wL, wR) / max(wL, wR) < 0.7:
