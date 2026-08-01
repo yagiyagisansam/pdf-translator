@@ -609,14 +609,15 @@ def _layout_page(page, page_units, factor, font_of):
                     if not lus:
                         continue
                     wl = col["x1"] - col["x0"]
-                    bands = obs_for(col["x0"], col["x1"])
+                    ybands, boxes = _obstacle_geo(page, col["x0"],
+                                                  col["x1"], taken)
                     ly = g["top"]
                     for u in lus:
                         ly = max(ly, u.get("_top", ly))   # per-unit anchor
-                        lines = _unit_lines([u], factor, wl, font_of)
-                        d, ly, rem = _flow_column(lines, col["x0"], wl, ly,
-                                                  g["bottom"], bands)
-                        draws += d; overflow += len(rem)
+                        d, ly, rem = _flow_units_lshape(
+                            [u], col["x0"], wl, ly, g["bottom"],
+                            ybands, boxes, factor, font_of)
+                        draws += d; overflow += rem
                         ly += _unit_size(u, factor) * LR * PARA_GAP
                     y = max(y, ly)
                 y += lh_page * PARA_GAP
