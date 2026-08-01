@@ -322,6 +322,15 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
             s -= 0.25
         return s
 
+    # a Japanese line can run a hair wider than its English box - clamp at a
+    # same-row neighbour that starts inside/just right of this box, so two
+    # column headers ("Green Filter" | "Green & Blue Filter") never graze
+    _row_bot = u["_top"] + _src_h + 2
+    for b in page["blocks"]:
+        if b["x0"] > x0 + 6 and b["x0"] < x1 + 6 and \
+                b.get("text", "").strip() and \
+                not (b["bottom"] <= u["_top"] - 1 or b["top"] >= _row_bot):
+            x1 = min(x1, max(b["x0"] - 2, x0 + 12))
     _w0 = max(12.0, x1 - x0)
     size = _shrunk(_w0)
     if u.get("_label") and size <= _floor + 0.26 and \
