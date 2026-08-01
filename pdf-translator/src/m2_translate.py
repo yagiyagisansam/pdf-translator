@@ -87,7 +87,11 @@ def protect(text):
             else:
                 s = m.group().strip()
             if s:
-                spans.append((m.start(), m.end(), s))
+                # a leading \s? in a pattern (NUM) must not let it START one
+                # char earlier than a longer, better span (DATE) at the same
+                # word - resolve overlaps on the text, not the stray space
+                lead = len(m.group()) - len(m.group().lstrip())
+                spans.append((m.start() + lead, m.end(), s))
     # resolve overlaps: keep earliest, longest
     spans.sort(key=lambda x: (x[0], -(x[1]-x[0])))
     chosen = []

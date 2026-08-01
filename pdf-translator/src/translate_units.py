@@ -110,6 +110,22 @@ def run(name: str, engine: str = "mock"):
                 for i, r in zip(empty, redo):
                     if r:
                         results[i] = r
+            # sentence-split fallback: a long unit the endpoint keeps returning
+            # empty for usually succeeds in smaller pieces - far better than
+            # leaving the whole paragraph in English
+            empty = [i for i in miss
+                     if not results[i] and items[i]["text"].strip()]
+            for i in empty:
+                parts = re.split(r"(?<=[.!?;:])\s+", items[i]["text"])
+                if len(parts) < 2:
+                    continue
+                outs = _safe_batch(translator.translate_batch,
+                                   [{"text": p, "kind": items[i]["kind"]}
+                                    for p in parts if p.strip()])
+                if outs and all(o for o in outs):
+                    results[i] = " ".join(outs)
+                    print(f"[{name}] unit {units[i]['uid']}: translated in "
+                          f"{len(outs)} sentence pieces", file=sys.stderr)
             # one retry for units whose placeholders did not survive
             bad = [i for i in miss
                    if results[i] and not _placeholders_ok(items[i]["text"], results[i])]
