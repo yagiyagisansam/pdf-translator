@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Milestone 1: Layout analysis engine
-import os, re, json, statistics
+import os, re, json, statistics, unicodedata
 import pdfplumber
 from PIL import Image, ImageDraw, ImageFont
 
@@ -60,6 +60,84 @@ def _char_segments(chars, gutter=None):
         seen.add(keys[0])
         deduped.append(c)
     chars = deduped
+    # SCALED-DUPLICATE RUNS: some PDFs draw a whole text panel TWICE at
+    # slightly different scales (an infographic exported once directly and
+    # once inside a rescaled form). Corresponding lines then sit up to a line
+    # pitch apart with DIFFERENT text at the colliding y, so char-level
+    # dedupe can never catch them and the copies interleave into gibberish.
+    # Detect whole baseline runs whose normalized text already appeared
+    # nearby at a slightly DIFFERENT size (a real repeated line - a table's
+    # recurring cell - repeats at the SAME size) and drop the copy. This runs
+    # BEFORE the per-char offset dedupe below: that one keeps only tight
+    # matches and would otherwise eat parts of a copy, leaving fragments no
+    # run key can pair up.
+    runs = []
+    for c in chars:
+        sz = c.get("size") or (c["bottom"] - c["top"]) or 8.0
+        r = runs[-1] if runs else None
+        # the split gap is TIGHT (~half a char size): two side-by-side panels'
+        # headers must not concatenate into one run, or the copies' keys
+        # ("CONGRESS" vs "CONGRESSFEDERAL") never match. Word spaces are well
+        # under 0.5x size; a justified line that still splits is harmless -
+        # both copies split at the same place and match piecewise.
+        if r is not None and abs(c["top"] - r["top"]) <= 0.35 and \
+                -1.0 <= c["x0"] - r["x1"] <= max(1.5, 0.5 * sz):
+            r["chars"].append(c)
+            r["x1"] = max(r["x1"], c["x1"])
+        else:
+            runs.append({"top": c["top"], "x0": c["x0"], "x1": c["x1"],
+                         "chars": [c]})
+    kept_runs = {}
+    drop = set()
+    for r in runs:
+        t = unicodedata.normalize("NFKC",
+                                  "".join(x["text"] for x in r["chars"]))
+        key = re.sub(r"[^0-9a-z]", "", t.lower())
+        if len(key) < 6:
+            continue
+        szs = [x.get("size") or 0 for x in r["chars"] if x.get("size")]
+        rsz = statistics.median(szs) if szs else 8.0
+        dup = False
+        for (px0, ptop, psz) in kept_runs.get(key, ()):
+            ratio = max(rsz, psz) / max(min(rsz, psz), 0.1)
+            if 1.02 <= ratio <= 1.35 and abs(r["x0"] - px0) <= 8.0 and \
+                    abs(r["top"] - ptop) <= 1.8 * max(rsz, psz):
+                dup = True
+                break
+        if dup:
+            drop.update(id(x) for x in r["chars"])
+        else:
+            kept_runs.setdefault(key, []).append((r["x0"], r["top"], rsz))
+    if drop:
+        chars = [c for c in chars if id(c) not in drop]
+    # OFFSET doubles: faux-bold re-draws a whole run shifted by up to ~2pt
+    # diagonally - too far for the exact buckets above, too close for distinct
+    # runs. A real repeated letter ("ll") sits on the SAME baseline exactly
+    # one advance away, so a same-glyph neighbour with a small-but-nonzero
+    # vertical offset (or well under one advance horizontally) can only be a
+    # double-print. The window stays TIGHT (<=1.2pt) on purpose: two unrelated
+    # lines from a scaled duplicate layer can nearly coincide, and a wider
+    # window eats legitimate letters out of them (the run pass above handles
+    # those as whole lines).
+    recent = {}                    # text -> [(x0, top, adv, size)] kept chars
+    deduped = []
+    for c in chars:
+        adv = c["x1"] - c["x0"]
+        sz = c.get("size") or (c["bottom"] - c["top"]) or 8.0
+        prev = recent.get(c["text"], [])
+        prev = [p for p in prev if p[1] >= c["top"] - 1.3]
+        dup = any(
+            (0.05 < abs(c["top"] - p[1]) <= 1.2 and abs(c["x0"] - p[0]) <= 2.0
+             and max(sz, p[3]) / max(min(sz, p[3]), 0.1) <= 1.15)
+            or (abs(c["top"] - p[1]) <= 0.05
+                and abs(c["x0"] - p[0]) <= 0.45 * max(adv, p[2]))
+            for p in prev)
+        if dup:
+            continue
+        prev.append((c["x0"], c["top"], adv, sz))
+        recent[c["text"]] = prev
+        deduped.append(c)
+    chars = deduped
     open_segs, done = [], []
     for c in chars:
         ch_h = (c["bottom"] - c["top"]) or 1.0
@@ -74,6 +152,21 @@ def _char_segments(chars, gutter=None):
             ov = min(s["bottom"], c["bottom"]) - max(s["top"], c["top"])
             if ov < 0.55 * min(ch_h, s["h"]):
                 continue
+            # a char far off the segment's size is a DIFFERENT element (an
+            # icon's 5.4pt badge word grazing a 10pt body line) - superscripts
+            # (~70% of body) stay within the ratio
+            cs = c.get("size") or 0
+            ss = s.get("sz") or 0
+            if cs and ss and max(cs, ss) / min(cs, ss) > 1.6:
+                continue
+            # INTERLEAVE guard: a char STARTING left of the segment's right
+            # edge would be sorted into its middle. Real text in one line only
+            # appends (kerning grazes < ~0.5pt); a mid-line insert at a
+            # different size is another element physically overlapping (a
+            # box header over a ghost body line) - keep them separate.
+            if c["x0"] < s["x1"] - 0.6 and cs and ss and \
+                    max(cs, ss) / min(cs, ss) > 1.1:
+                continue
             gap = max(c["x0"] - s["x1"], s["x0"] - c["x1"], 0.0)
             # word spaces are ~0.5x char width; column/label gaps are far larger.
             # The cap keeps a stretched (justified) space inside the line while a
@@ -83,8 +176,13 @@ def _char_segments(chars, gutter=None):
                 continue
             # split at the column gutter, but only when the gap there is clearly
             # wider than a word space - a full-width title/abstract line crosses
-            # the gutter with normal spacing and must stay whole
-            if gutter is not None and gap > 2.0 * s["cw"] and (
+            # the gutter with normal spacing and must stay whole. The word-space
+            # yardstick is the SMALLER char width of the two sides: a large-font
+            # heading on the other side of the gutter otherwise inflates it
+            # until a real column gap reads as a word space (and the columns
+            # merge and interleave).
+            if gutter is not None and \
+                    gap > 2.0 * min(s["cw"], (c["x1"] - c["x0"]) or s["cw"]) and (
                     (s["x1"] <= gutter <= c["x0"]) or (c["x1"] <= gutter <= s["x0"])):
                 continue
             score = (ov / min(ch_h, s["h"]), -gap)
@@ -94,7 +192,8 @@ def _char_segments(chars, gutter=None):
             open_segs.append({
                 "chars": [c], "x0": c["x0"], "x1": c["x1"],
                 "top": c["top"], "bottom": c["bottom"],
-                "h": ch_h, "cw": (c["x1"] - c["x0"]) or mw})
+                "h": ch_h, "cw": (c["x1"] - c["x0"]) or mw,
+                "sz": c.get("size") or 0})
         else:
             s = best
             s["chars"].append(c)
@@ -103,6 +202,7 @@ def _char_segments(chars, gutter=None):
             # running medians keep the attach thresholds stable within the line
             s["h"] = statistics.median(x["bottom"] - x["top"] for x in s["chars"]) or 1.0
             s["cw"] = statistics.median(x["x1"] - x["x0"] for x in s["chars"]) or mw
+            s["sz"] = statistics.median(x.get("size") or 0 for x in s["chars"])
             # A raised superscript (or a symbol like ±) can open its own segment
             # BEFORE its line's lower chars arrive (chars stream in top order);
             # the line then grows toward it from the side. Merge open segments
@@ -116,11 +216,33 @@ def _char_segments(chars, gutter=None):
                     ov = min(s["bottom"], o["bottom"]) - max(s["top"], o["top"])
                     if ov < 0.55 * min(s["h"], o["h"]):
                         continue
+                    if s.get("sz") and o.get("sz") and \
+                            max(s["sz"], o["sz"]) / min(s["sz"], o["sz"]) > 1.6:
+                        continue
+                    # INTERLEAVE guard (same as the char-attach one): two real
+                    # same-line segments meet edge to edge; segments whose
+                    # x-ranges OVERLAP at different sizes are different
+                    # elements printed on top of each other - merging would
+                    # shuffle their chars together. A TINY segment (<=3 chars)
+                    # is a superscript/subscript that opened early and must
+                    # still rejoin its line (the char-attach guard split it
+                    # out precisely because its size differs).
+                    x_ov = min(s["x1"], o["x1"]) - max(s["x0"], o["x0"])
+                    if x_ov > 0.6 and s.get("sz") and o.get("sz") and \
+                            max(s["sz"], o["sz"]) / min(s["sz"], o["sz"]) > 1.1:
+                        tiny, big = (s, o) if len(s["chars"]) <= len(o["chars"]) \
+                            else (o, s)
+                        # only a SMALLER-size tiny segment is a super/subscript
+                        # rejoining its line; a LARGER-size one is another
+                        # element's lettering arriving char by char
+                        if not (len(tiny["chars"]) <= 3
+                                and tiny["sz"] <= big["sz"]):
+                            continue
                     gap = max(o["x0"] - s["x1"], s["x0"] - o["x1"], 0.0)
                     if gap > min(max(3.2 * max(s["cw"], o["cw"]),
                                      1.6 * max(s["h"], o["h"])), 30.0):
                         continue
-                    if gutter is not None and gap > 2.0 * max(s["cw"], o["cw"]) and (
+                    if gutter is not None and gap > 2.0 * min(s["cw"], o["cw"]) and (
                             (s["x1"] <= gutter <= o["x0"]) or (o["x1"] <= gutter <= s["x0"])):
                         continue
                     s["chars"] += o["chars"]
@@ -130,6 +252,8 @@ def _char_segments(chars, gutter=None):
                         x["bottom"] - x["top"] for x in s["chars"]) or 1.0
                     s["cw"] = statistics.median(
                         x["x1"] - x["x0"] for x in s["chars"]) or mw
+                    s["sz"] = statistics.median(
+                        x.get("size") or 0 for x in s["chars"])
                     open_segs.remove(o)
                     merged = True
                     break
@@ -164,8 +288,14 @@ def cluster_lines(chars, gutter=None):
             # never orphan a leading list/heading marker ("•", "3.", "[12]") -
             # its text always starts at a shared edge (hanging indent)
             head = "".join(x["text"] for x in cur).strip()
+            # a SHORT single-word head ("Other| penalties.") is usually a bold
+            # run-in lead followed by an em-quad, not an island boundary -
+            # demand a clearly-wider gap before splitting it off. A table
+            # label cell ("EMEA | 3,240") still splits: its gap is huge.
+            short_head = " " not in head and len(head) <= 12
+            need = max(4.0, (2.4 if short_head else 1.2) * cw)
             if not marker_re.match(head) and at_edge(c["x0"]) \
-                    and c["x0"] - cur[-1]["x1"] >= max(4.0, 1.2 * cw):
+                    and c["x0"] - cur[-1]["x1"] >= need:
                 out.append(cur); cur = [c]
             else:
                 cur.append(c)
@@ -191,11 +321,18 @@ def find_gutter(chars, page_w, x0=0):
     # text stays on its own side, so what remains exposes the whitespace band.
     band = width * 0.04
     col_chars = []
+    crossing = 0
     for seg in _char_segments(chars):
         rl = min(c["x0"] for c in seg); rr = max(c["x1"] for c in seg)
         if rl < mid_guess - band and rr > mid_guess + band:
+            crossing += len(seg)
             continue
         col_chars.extend(seg)
+    # a page whose text is MOSTLY full-width lines is a single-column page
+    # with an inset box/sidebar - the side-confined leftovers must not
+    # fabricate a gutter (paragraphs would reflow into phantom half lanes)
+    if crossing > 0.5 * len(chars):
+        return None
     if len(col_chars) < 40:
         col_chars = chars  # fallback
 
@@ -402,6 +539,12 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
         return "title"
     if _headish(t) or (b["bold"] and b["size"] >= body_size * 1.05 and len(t) < 60):
         return "heading"
+    # ICON BADGE lettering ("CAUTION" / "TIP" stamped inside a margin icon):
+    # a tiny ALL-CAPS standalone word far below body size is artwork, not
+    # prose - translating it draws Japanese over the icon's baked-in word
+    if b.get("nlines", 1) == 1 and (b.get("size") or 9) <= 6.5 and \
+            len(t.strip()) <= 8 and t.strip().isupper():
+        return "data"
     # Mostly-UPPERCASE short blocks are headings even at body size and even
     # without a bold flag ("h. 7-1-1. NATIONAL WEATHER SERVICE ..." in
     # regulation manuals mark headings by CAPS alone) - typed as body they
@@ -494,18 +637,45 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             # prose is harmless (M2 re-merges it into the paragraph unit).
             if gap > 0.45 * page_text_w:
                 continue
+            # a row-mate at a WILDLY different size is page decoration (the
+            # 70pt chapter numeral beside a 24pt divider title), not a table
+            # cell - sealing the title would break its multi-line stitch
+            lsz, msz = l.get("size") or 0, m.get("size") or 0
+            if lsz and msz and max(lsz, msz) / min(lsz, msz) > 2.0:
+                continue
             if _numericish(m["text"]) or _row_rule_spans(l, m):
-                return True
-        return False
+                return "cell"
+            # PARALLEL WORD-LIST COLUMNS ("banking hours | eye opener |
+            # real estate"): both lines are SHORT - the body lines of a real
+            # two-column document fill their column width and never match.
+            # Without the seal each column merges into a run-on paragraph
+            # ("冷酷な脚注無分別な非法行為..." gibberish) drawn over the
+            # other columns' surviving English. Tagged "list" so the stacked-
+            # cell merge never chains the stack back together.
+            if len(l["text"]) <= 32 and len(m["text"]) <= 32 and gap >= 12:
+                return "list"
+        return None
 
     # a DOT-LEADER line (TOC row "Title . . . . 1-1-12") is one row of a
     # leadered list even when the leader glues the title and the page number
     # into a single segment - sealing it keeps rows from chaining into one
     # run-on paragraph of dots
     _leader = re.compile(r"(?:[.·⋅]\s*){5,}")
-    record_rows = {id(l) for l in ls
-                   if _is_record_row(l) or _is_contact_line(l["text"])
-                   or _leader.search(l["text"])}
+    record_rows, list_rows = set(), set()
+    for l in ls:
+        why = _is_record_row(l)
+        if why or _is_contact_line(l["text"]) or _leader.search(l["text"]):
+            record_rows.add(id(l))
+        if why == "list":
+            list_rows.add(id(l))
+        # ICON BADGE lettering ("CAUTION"/"TIP" stamped in a margin icon):
+        # tiny ALL-CAPS word far below body size. Sealed so it can never be
+        # absorbed into the neighbouring paragraph, where it would translate
+        # inline and lose its data classification.
+        t = l["text"].strip()
+        if l.get("size") and l["size"] <= 6.5 and len(t) <= 8 and \
+                t.isupper() and t.isalpha():
+            record_rows.add(id(l))
     open_blocks, done = [], []
     for l in ls:
         lh = (l["bottom"] - l["top"]) or 1.0
@@ -570,7 +740,8 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
         if best is None:
             blk = {"lines": [l], "x0": l["x0"], "x1": l["x1"],
                    "top": l["top"], "bottom": l["bottom"],
-                   "size_med": l["size"], "record": id(l) in record_rows}
+                   "size_med": l["size"], "record": id(l) in record_rows,
+                   "list": id(l) in list_rows}
             # a record row (TOC/table row) is sealed: one line = one block,
             # nothing may attach to it
             (done if id(l) in record_rows else open_blocks).append(blk)
@@ -586,7 +757,10 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
     # own record row (the header underline rule spans the row), which made
     # three one-line cells whose translations wrap chaotically. Vertically
     # adjacent record rows that share their x-range are ONE cell.
-    recs = [b for b in done + open_blocks if b.get("record")]
+    # list ITEMS (parallel word-list rows) are independent entries, never the
+    # stacked lines of one cell - exclude them or the whole column re-chains
+    recs = [b for b in done + open_blocks
+            if b.get("record") and not b.get("list")]
     recs.sort(key=lambda b: (b["x0"], b["top"]))
     merged_away = set()
     for a in recs:
@@ -625,6 +799,8 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
         blk["col"] = assign_column(blk, mid, left, right)
         if b.get("record"):
             blk["record"] = True
+        if b.get("list"):
+            blk["list"] = True
         blocks.append(blk)
     return blocks
 
@@ -786,7 +962,15 @@ def analyze_pdf(path, name, render=True):
         # First pass to estimate body size, then detect the column gutter from body-region chars
         prelim = cluster_lines(chars)
         from collections import Counter
-        szs = Counter(round(l["size"]) for l in prelim if l["size"])
+        # votes are weighted by TEXT LENGTH, not line count: a chart's dozens
+        # of 1-2 char tick labels must not outvote the page's real paragraphs,
+        # or body_size collapses to the label size and the phantom "body"
+        # chars fabricate a column gutter through the middle of the chart
+        # (paragraphs then reflow into half-width lanes and overflow).
+        szs = Counter()
+        for l in prelim:
+            if l["size"]:
+                szs[round(l["size"])] += max(1, len(l["text"].strip()))
         body_size = szs.most_common(1)[0][0] if szs else 10
         body_chars = [c for c in chars
                       if abs(round(c.get("size", 0)) - body_size) <= 1]
@@ -885,7 +1069,10 @@ def analyze_pdf(path, name, render=True):
                 boxes = out
             for bx in boxes:
                 w, h = bx[2] - bx[0], bx[3] - bx[1]
-                if bx[4] < 6 or w * h < 8000 or w * h > 0.8 * pw * ph:
+                # 200-8000pt2 with many curves = a margin ICON (the TIP/
+                # CAUTION roundel): registered as a small figure so the flow
+                # never draws text across the artwork
+                if bx[4] < 6 or w * h < 200 or w * h > 0.8 * pw * ph:
                     continue
                 # a cluster that CONTAINS flowing body text is a decorated
                 # panel (background swirl, callout box), not a diagram
@@ -904,11 +1091,13 @@ def analyze_pdf(path, name, render=True):
                 figs.append({"type": "figure", "col": 0, "vector": True,
                              "x0": bx[0], "x1": bx[2], "top": bx[1],
                              "bottom": bx[3], "text": "", "order": None})
-            # small text sitting inside a vector diagram is figure content
+            # small text sitting inside a vector diagram is figure content -
+            # incl. chart titles and source notes (multi-line but small type):
+            # translating them draws Japanese over the chart's own lettering
             for b in blocks:
                 if b["type"] not in ("body", "heading", "caption") or \
                         (b.get("size") or 0) > body_size * 1.15 or \
-                        len(b["text"]) > 160:
+                        len(b["text"]) > 400:
                     continue
                 ba = max(0.0, (b["x1"] - b["x0"])) * max(0.0, (b["bottom"] - b["top"]))
                 if not ba:
@@ -958,6 +1147,12 @@ def analyze_pdf(path, name, render=True):
     def norm(t): return re.sub(r"[\d\s]", "", t).lower()[:40]
 
     def in_margin(b, p):
+        # furniture is SMALL text: a chapter divider's 24pt display title
+        # repeats the same words as the chapter's running heads, but it is the
+        # page's content, not furniture - never seal display-size text
+        if b.get("size") and p.get("body_size") and \
+                b["size"] > p["body_size"] * 1.3:
+            return False
         return (b["top"] < p["height"] * 0.15
                 or b["bottom"] > p["height"] * 0.88)
     topcnt = Counter()

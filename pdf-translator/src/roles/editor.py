@@ -46,6 +46,13 @@ def _overlaps(a0, a1, b0, b1):
     return not (a1 <= b0 + 1 or b1 <= a0 + 1)
 
 
+def _badge_like(b):
+    """Icon badge lettering (tiny ALL-CAPS word stamped in a margin icon)."""
+    t = (b.get("text") or "").strip()
+    return (b.get("size") or 9) <= 6.5 and len(t) <= 8 and \
+        t.isupper() and t.isalpha()
+
+
 def _merged_bands(obstacles):
     bands = sorted((t, b) for (t, b) in obstacles)
     out = []
@@ -57,13 +64,46 @@ def _merged_bands(obstacles):
     return out
 
 
+def _obstacle_figs(page):
+    """Figures that should block text placement. A figure covering (almost) the
+    whole page is a BACKGROUND (chapter-divider artwork, watermark, cover photo)
+    - the source prints its text on top of it, so we must too; treating it as an
+    obstacle leaves the page's text nowhere to go. Likewise a figure that
+    CONTAINS most of the page's translatable text (a cover collage, a decorated
+    panel) is the canvas the text sits on, not something to flow around."""
+    pw = page.get("width") or 612.0
+    ph = page.get("height") or 792.0
+    trans = [b for b in page["blocks"] if b["type"] in TRANS]
+
+    def _area(b):
+        return max(b["x1"] - b["x0"], 0.0) * max(b["bottom"] - b["top"], 0.0)
+
+    def _inside(b, f):
+        ox = min(b["x1"], f["x1"]) - max(b["x0"], f["x0"])
+        oy = min(b["bottom"], f["bottom"]) - max(b["top"], f["top"])
+        if ox <= 0 or oy <= 0:
+            return 0.0
+        return ox * oy / max(_area(b), 1.0)
+
+    tot = sum(_area(b) for b in trans) or 1.0
+    out = []
+    for f in page.get("figures", []):
+        if (f["x1"] - f["x0"]) * (f["bottom"] - f["top"]) >= 0.8 * pw * ph:
+            continue
+        cov = sum(_area(b) for b in trans if _inside(b, f) >= 0.7)
+        if cov >= 0.5 * tot:
+            continue
+        out.append(f)
+    return out
+
+
 def _obstacles_for(page, x0, x1):
     """(top, bottom) bands in [x0,x1] from figures + kept-language text + vector
     rules. Vector art is kept in place, so a horizontal rule (abstract-box border,
     section separator, table rule) that crosses this column becomes a small
     obstacle band the flow skips - Japanese is never drawn across a line."""
     obs = []
-    for f in page.get("figures", []):
+    for f in _obstacle_figs(page):
         if _overlaps(x0, x1, f["x0"], f["x1"]):
             obs.append((f["top"] - 6, f["bottom"] + 6))
     for b in page["blocks"]:
@@ -73,7 +113,13 @@ def _obstacles_for(page, x0, x1):
         # surviving English -> the "overlay" seen when translation partially fails.
         if (b["type"] in KEPT or b.get("_keep_en")) and \
                 _overlaps(x0, x1, b["x0"], b["x1"]):
-            obs.append((b["top"] - 2, b["bottom"] + 2))
+            if _badge_like(b):
+                # an icon's badge word sits INSIDE artwork (the TIP/CAUTION
+                # roundel) whose vector shape we cannot see - clear the whole
+                # icon, not just the lettering
+                obs.append((b["top"] - 14, b["bottom"] + 8))
+            else:
+                obs.append((b["top"] - 2, b["bottom"] + 2))
     for r in page.get("rules", []):
         if _overlaps(x0, x1, r["x0"], r["x1"]):
             obs.append((r["top"] - 3, r["bottom"] + 3))
@@ -240,7 +286,7 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
             if b["x0"] > x0 + 1 and b.get("text", "").strip() and \
                     not (b["bottom"] <= u["_top"] + 1 or b["top"] >= bottom_est):
                 right = min(right, max(b["x0"] - 3, x0 + 12))
-        for f in page.get("figures", []):
+        for f in _obstacle_figs(page):
             if f["x0"] >= x1 - 1 and \
                     not (f["bottom"] <= u["_top"] + 1 or f["top"] >= bottom_est):
                 right = min(right, f["x0"] - 2)
@@ -259,15 +305,51 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
             y += size * LR
         taken.append((x0, x0 + width, u["_top"] - 1, y + 1))
         return draws
+    # SHRINK-TO-FIT: an infographic box label / margin note should stay
+    # INSIDE its own box. Japanese that wraps far taller than the source
+    # cascades down into the next box's area and the boxes' texts pile up.
+    # Shrink (bounded - readability floor and 62% of source) until the
+    # wrapped height roughly matches the source height, THEN flow.
+    _w0 = max(12.0, x1 - x0)
+    _src_sz = u.get("_size") or size
+    _src_h = max(1, u.get("_nlines", 1)) * _src_sz * 1.3 + 2
+    _floor = max(4.6, 0.62 * _src_sz)
+    while size > _floor and \
+            len(m3._wrap(u["target"], font, size, _w0)) * size * LR \
+            > _src_h * 1.15:
+        size -= 0.25
     lh = size * LR
-    bands = list(_obstacles_for(page, x0, x1))
+    # figures and KEPT TEXT are real obstacles always (a margin icon's badge
+    # word must never be overdrawn); only RULE bands get the thin-band
+    # exemption, because a table row rule at the cell's edge must not push the
+    # cell's first line out of its row
+    bands = []
+    for f in _obstacle_figs(page):
+        if _overlaps(x0, x1, f["x0"], f["x1"]):
+            # the unit's SOURCE sat on this figure (a bubble-chart circle, a
+            # decorated panel): the artwork is this label's canvas, exactly
+            # where the Japanese belongs - not an obstacle (mirrors m3's
+            # on_figs exemption and QA's source-overlap exemption)
+            if not (f["bottom"] <= u["_top"] - 2
+                    or f["top"] >= u["_top"] + _src_h + 2):
+                continue
+            bands.append((f["top"] - 6, f["bottom"] + 6))
+    for b in page["blocks"]:
+        if (b["type"] in KEPT or b.get("_keep_en")) and \
+                _overlaps(x0, x1, b["x0"], b["x1"]):
+            if _badge_like(b):
+                bands.append((b["top"] - 14, b["bottom"] + 8))
+            else:
+                bands.append((b["top"] - 2, b["bottom"] + 2))
+    for r in page.get("rules", []):
+        if _overlaps(x0, x1, r["x0"], r["x1"]):
+            t, bo = r["top"] - 3, r["bottom"] + 3
+            if bo - t <= 12.0 and t < u["_top"] + lh and bo > u["_top"] - 2:
+                continue
+            bands.append((t, bo))
     for (tx0, tx1, tt, tb) in taken:
         if not (tx1 <= x0 or tx0 >= x1):
             bands.append((tt, tb))
-    # a THIN band (a table row rule at the cell's edge) must not push the
-    # cell's first line out of its row - only substantial obstacles move text
-    bands = [(t, bo) for (t, bo) in bands
-             if not (bo - t <= 12.0 and t < u["_top"] + lh and bo > u["_top"] - 2)]
     bands = _merged_bands(bands)
     width = max(12.0, x1 - x0)
     wrapped = m3._wrap(u["target"], font, size, width)
@@ -488,6 +570,17 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
         else:
             draws, ov = _layout_page(page, pu, factor_min, _font_of)
             best = draws
+            # EMERGENCY: dropping lines loses content the reader can never
+            # recover; tiny-but-present text is strictly better. Push below
+            # the readability floor only as far as needed to fit.
+            f2 = factor_min
+            while ov and f2 > 0.34:
+                f2 = max(0.34, f2 - 0.07)
+                d2, o2 = _layout_page(page, pu, f2, _font_of)
+                if o2 < ov:
+                    best, ov = d2, o2
+                if o2 == 0:
+                    break
             total_overflow += ov
         per_page[pi] = best
     return per_page, total_overflow
@@ -572,10 +665,12 @@ def build(name, src_path, floor=6.0):
         kill[pi] = kill_drop[pi] = ""
         if pi in skip_pages:
             continue                       # leave this page's English untouched
+        covered = []
         for bi, b in enumerate(p["blocks"]):
             if b["type"] in TRANS and f"{pi}:{bi}" in unit_for_block:
                 kill[pi] += m3._norm_txt(b["text"])
                 kill_drop[pi] += m3._norm_txt_drop(b["text"])
+                covered.append(b)
             elif b["type"] in TRANS and re.search(r"[A-Za-z]", b["text"]):
                 # translatable but NOT covered by a translated unit: its English
                 # stays on the page, so mark it so the reflow treats it as an
@@ -583,6 +678,14 @@ def build(name, src_path, floor=6.0):
                 # bare bullet markers, symbols - are NOT obstacles: a "•" must
                 # not cut a whole flow lane in half at its y.)
                 b["_keep_en"] = True
+        # ROW-MAJOR blob: the content stream often draws one op per VISUAL ROW
+        # across parallel columns ("afterglow forget-me-not right-of-way"),
+        # while the blob above is column-major - the op can only match a blob
+        # rebuilt in row order. "|" separates the two orders (op text is
+        # alnum-only after normalization, so it can never bridge them).
+        rows = sorted(covered, key=lambda b: (round(b["top"] / 4.0), b["x0"]))
+        kill[pi] += "|" + "".join(m3._norm_txt(b["text"]) for b in rows)
+        kill_drop[pi] += "|" + "".join(m3._norm_txt_drop(b["text"]) for b in rows)
     pdf = Pdf.open(src_path)
     for pi, page in enumerate(pdf.pages):
         if kill.get(pi):

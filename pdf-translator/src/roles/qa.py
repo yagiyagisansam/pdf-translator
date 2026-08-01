@@ -93,7 +93,10 @@ def _jp_on_english_overlaps(path):
                 for j in jp:
                     ix = min(e["x1"], j["x1"]) - max(e["x0"], j["x0"])
                     iy = min(e["bottom"], j["bottom"]) - max(e["top"], j["top"])
-                    if ix > 0 and iy > 0 and ix * iy > 6:
+                    # a REAL overprint overlaps by >=3pt in both axes; a 1-2pt
+                    # edge graze (a flow line laid flush under a kept icon
+                    # badge) is not something a reader can see
+                    if min(ix, iy) >= 2.5 and ix * iy > 8:
                         hits.append((pi, e["text"], round(e["x0"]), round(e["top"])))
                         break
     return hits

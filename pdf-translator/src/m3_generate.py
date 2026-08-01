@@ -175,10 +175,63 @@ def _parse_tounicode(data):
     return mp
 
 
+_GLYPH_UNI = {
+    "space": " ", "period": ".", "comma": ",", "hyphen": "-", "slash": "/",
+    "percent": "%", "ampersand": "&", "colon": ":", "semicolon": ";",
+    "quotesingle": "'", "quotedbl": '"', "quoteright": "'", "quoteleft": "'",
+    "quotedblleft": '"', "quotedblright": '"', "endash": "-", "emdash": "-",
+    "parenleft": "(", "parenright": ")", "bracketleft": "[", "bracketright": "]",
+    "dollar": "$", "plus": "+", "equal": "=", "question": "?", "exclam": "!",
+    "at": "@", "underscore": "_", "asterisk": "*", "numbersign": "#",
+    "less": "<", "greater": ">", "bar": "|", "backslash": "\\",
+}
+for _i, _w in enumerate(["zero", "one", "two", "three", "four", "five",
+                         "six", "seven", "eight", "nine"]):
+    _GLYPH_UNI[_w] = str(_i)
+
+
+def _glyph_to_uni(g):
+    """Best-effort unicode for a PostScript glyph name ('a', 'zero', 'fi')."""
+    if len(g) == 1 and (g.isalpha() or g.isdigit()):
+        return g
+    if g in _GLYPH_UNI:
+        return _GLYPH_UNI[g]
+    if g in ("fi", "fl", "ff", "ffi", "ffl"):  # ligatures
+        return g
+    m = re.fullmatch(r"uni([0-9A-Fa-f]{4})", g)
+    if m:
+        cp = int(m.group(1), 16)
+        return chr(cp) if cp < 0x110000 else ""
+    return ""
+
+
+def _differences_decoder(font):
+    """{code->unicode} from /Encoding /Differences glyph names, for simple fonts
+    without /ToUnicode. Unlisted codes keep a printable-ASCII identity (the usual
+    base encodings agree with ASCII there)."""
+    enc = font.get("/Encoding")
+    if enc is None or not hasattr(enc, "get"):
+        return None
+    diffs = enc.get("/Differences")
+    if diffs is None:
+        return None
+    mp = {c: chr(c) for c in range(0x20, 0x7F)}
+    code = 0
+    for el in diffs:
+        if isinstance(el, (int, pikepdf.Object)) and str(el).lstrip("-").isdigit():
+            code = int(el)
+        else:
+            mp[code] = _glyph_to_uni(str(el).lstrip("/"))
+            code += 1
+    return mp
+
+
 def _page_font_decoders(page):
     """Return {font_name(str) -> (bytes_per_code:int, {code->unicode})} for fonts
-    on the page that carry a /ToUnicode map. Fonts without one are omitted, and
-    ops in them fall back to raw-byte matching (works for standard encodings)."""
+    on the page that carry a /ToUnicode map, plus an /Encoding /Differences
+    fallback for simple fonts without one (chart fonts in some report PDFs).
+    Fonts with neither are omitted, and ops in them fall back to raw-byte
+    matching (works for standard encodings)."""
     decoders = {}
     try:
         fonts = page.Resources.Font
@@ -187,10 +240,14 @@ def _page_font_decoders(page):
     for name, font in fonts.items():
         try:
             tu = font.get("/ToUnicode")
-            if tu is None:
+            if tu is not None:
+                width = 2 if str(font.get("/Subtype", "")) == "/Type0" else 1
+                decoders[str(name)] = (width, _parse_tounicode(tu.read_bytes()))
                 continue
-            width = 2 if str(font.get("/Subtype", "")) == "/Type0" else 1
-            decoders[str(name)] = (width, _parse_tounicode(tu.read_bytes()))
+            if str(font.get("/Subtype", "")) != "/Type0":
+                mp = _differences_decoder(font)
+                if mp:
+                    decoders[str(name)] = (1, mp)
         except Exception:
             continue
     return decoders
@@ -331,18 +388,42 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         while j < tn and (not dropped[text_idx[j]]) and _is_frag(text_idx[j]):
             j += 1
         run = [text_idx[m] for m in range(k, j)]
-        joined = "".join((op_uni[idx] if op_uni[idx] is not None
-                          else _op_text(ops[idx])) for idx in run)
-        nj = _norm_txt(joined)
-        if len(nj) >= 8 and _matches_blob(nj, kill_blob, blob_drop,
-                                          _norm_txt_drop(joined),
-                                          blob_nodigit=blob_nodigit):
-            for idx in run:
-                raw = (op_uni[idx] if op_uni[idx] is not None
-                       else _op_text(ops[idx])).strip()
-                if raw and _norm_txt(raw) in keep_tokens:
-                    continue
-                dropped[idx] = True
+        # GREEDY SUB-RUN MATCH: the run may span several lines whose STREAM
+        # order differs from both blob orders (a bullet list drawn per char,
+        # columns interleaved). Consume the run left to right: keep extending
+        # a window while its joined text still matches the blob; when it stops
+        # matching, drop the matched prefix (if substantial) and restart.
+        texts = [(op_uni[idx] if op_uni[idx] is not None else _op_text(ops[idx]))
+                 for idx in run]
+        rp = 0
+        while rp < len(run):
+            acc = ""
+            last_ok = None
+            re_ = rp
+            while re_ < len(run):
+                cand = acc + texts[re_]
+                nj = _norm_txt(cand)
+                if nj and not _matches_blob(nj, kill_blob, blob_drop,
+                                            _norm_txt_drop(cand),
+                                            blob_nodigit=blob_nodigit) \
+                        and len(nj) >= 8:
+                    break
+                acc = cand
+                if len(nj) >= 8 and _matches_blob(nj, kill_blob, blob_drop,
+                                                  _norm_txt_drop(cand),
+                                                  blob_nodigit=blob_nodigit):
+                    last_ok = re_
+                re_ += 1
+            if last_ok is not None:
+                for m2 in range(rp, last_ok + 1):
+                    idx = run[m2]
+                    raw = texts[m2].strip()
+                    if raw and _norm_txt(raw) in keep_tokens:
+                        continue
+                    dropped[idx] = True
+                rp = last_ok + 1
+            else:
+                rp += 1
         k = j
     for i in text_idx:
         if dropped[i]: continue
@@ -735,6 +816,7 @@ def generate(name, src_path):
     kill_blob_drop = {pi: "" for pi in range(len(layout["pages"]))}
     unit_regions = {}   # uid -> (unit, regions)
     for pi, p in enumerate(layout["pages"]):
+        covered = []
         for bi, b in enumerate(p["blocks"]):
             if b["type"] not in TRANS:
                 continue
@@ -744,6 +826,12 @@ def generate(name, src_path):
                 continue
             kill_blob[pi] += _norm_txt(b["text"])
             kill_blob_drop[pi] += _norm_txt_drop(b["text"])
+            covered.append(b)
+        # ROW-MAJOR blob (see editor.build): one op can span a visual row
+        # across parallel columns - it only matches a row-ordered blob
+        rows = sorted(covered, key=lambda b: (round(b["top"] / 4.0), b["x0"]))
+        kill_blob[pi] += "|" + "".join(_norm_txt(b["text"]) for b in rows)
+        kill_blob_drop[pi] += "|" + "".join(_norm_txt_drop(b["text"]) for b in rows)
 
     for u in units:
         if not u.get("target"):
@@ -823,9 +911,13 @@ def generate(name, src_path):
             for b in visible:
                 if overlaps_x(rb["x0"], rb["x1"], b["x0"], b["x1"]):
                     bands.append((b["top"] - 1.0, b["bottom"] + 1.0))
+            pw = p.get("width") or 612.0
+            ph = p.get("height") or 792.0
             for f in p.get("figures", []):
                 if id(f) in rb.get("on_figs", ()):
                     continue    # source text sat ON this figure - not an obstacle
+                if (f["x1"] - f["x0"]) * (f["bottom"] - f["top"]) >= 0.8 * pw * ph:
+                    continue    # full-page BACKGROUND art - source prints on it
                 if overlaps_x(rb["x0"], rb["x1"], f["x0"], f["x1"]):
                     bands.append((f["top"] - 8.0, f["bottom"] + 8.0))
             # vector rules (table borders, separators) stay in place - text must
