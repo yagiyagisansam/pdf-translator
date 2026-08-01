@@ -551,8 +551,18 @@ def _wrap(text, font, size, max_w):
                 brk = len(cur)
             cur += ch; cur_w += w
             continue
-        # overflow - kinsoku first: closing punctuation hangs on this line
+        # overflow - kinsoku first (行頭禁則). 追い出し: push the previous
+        # char down together with the forbidden head char, so the line never
+        # exceeds max_w - hanging it past the edge (ぶら下がり) bled into
+        # same-row neighbours ("グリーンフィルター" over the next header).
+        # Only when the line would become empty does the char hang instead.
         if ch in _KINSOKU_HEAD:
+            if len(cur) >= 2:
+                lines.append(cur[:-1])
+                cur = cur[-1] + ch
+                cur_w = W(cur[0]) + w
+                brk = -1
+                continue
             lines.append(cur + ch); cur = ""; cur_w = 0.0; brk = -1
             continue
         # break at the last word boundary when we are inside an ASCII word,
