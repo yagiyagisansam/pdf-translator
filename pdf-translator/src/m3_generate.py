@@ -21,10 +21,19 @@ from pypdf import PdfReader, PdfWriter
 
 from config import OUT, ensure_out, resolve_pdf
 
-def _register_fonts():
+def _register_fonts(name=None):
+    """Register the subset fonts, preferring the PER-DOCUMENT files (the
+    shared ones can be overwritten by a concurrent run for another doc)."""
     reg = {}
     rpath = f"{OUT}/NotoJP-sub.ttf"
     bpath = f"{OUT}/NotoJP-Bold-sub.ttf"
+    if name:
+        pr = f"{OUT}/NotoJP-sub-{name}.ttf"
+        pb = f"{OUT}/NotoJP-Bold-sub-{name}.ttf"
+        if os.path.exists(pr):
+            rpath = pr
+        if os.path.exists(pb):
+            bpath = pb
     pdfmetrics.registerFont(TTFont("NotoJP", rpath)); reg["r"] = rpath
     try:
         pdfmetrics.registerFont(TTFont("NotoJP-Bold", bpath)); reg["b"] = bpath
@@ -740,7 +749,7 @@ def _remaining_after(text, taken_lines):
 # ---- main pipeline -------------------------------------------------------------
 def generate(name, src_path):
     ensure_out()
-    _register_fonts()
+    _register_fonts(name)
     units=json.load(open(f"{OUT}/{name}_bilingual.json"))
     sanitize_targets(units)
     layout=json.load(open(f"{OUT}/{name}_layout.json"))

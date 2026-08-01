@@ -665,7 +665,10 @@ def build(name, src_path, floor=6.0):
     # Rebuilding is cheap (~2s) and only happens when a char is missing.
     try:
         from fontTools.ttLib import TTFont as _FT
-        cover = set(_FT(f"{OUT}/NotoJP-sub.ttf").getBestCmap().keys())
+        _fp = f"{OUT}/NotoJP-sub-{name}.ttf"
+        if not os.path.exists(_fp):
+            _fp = f"{OUT}/NotoJP-sub.ttf"
+        cover = set(_FT(_fp).getBestCmap().keys())
         need = {ord(ch) for u in units if u.get("target")
                 for ch in u["target"] if ord(ch) > 127}
         stale = bool(need - cover)
@@ -674,7 +677,7 @@ def build(name, src_path, floor=6.0):
     if stale:
         from config import make_jp_font_for
         make_jp_font_for(name)
-    m3._register_fonts()
+    m3._register_fonts(name)
     m3.sanitize_targets(units)   # no-glyph chars (dingbats) -> visible bullet
 
     # Slide decks (any landscape page) and poster/brochure-style documents don't

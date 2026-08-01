@@ -112,6 +112,16 @@ def make_fonts(names):
     print("unique chars:", len(ch))
     build(find_font("regular"), f"{OUT}/NotoJP-sub.ttf", 0, ch)
     build(find_font("bold"), f"{OUT}/NotoJP-Bold-sub.ttf", 0, ch)
+    # PER-DOCUMENT copies: the OUT dir is shared, so a concurrent run for
+    # another document overwrites the shared files between this build and the
+    # consumer's font registration - the PDF then embeds a subset lacking this
+    # document's characters (tofu). Consumers prefer the per-name file.
+    if len(names) == 1:
+        import shutil
+        shutil.copyfile(f"{OUT}/NotoJP-sub.ttf",
+                        f"{OUT}/NotoJP-sub-{names[0]}.ttf")
+        shutil.copyfile(f"{OUT}/NotoJP-Bold-sub.ttf",
+                        f"{OUT}/NotoJP-Bold-sub-{names[0]}.ttf")
 
 if __name__=="__main__":
     import argparse

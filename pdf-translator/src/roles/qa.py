@@ -155,7 +155,11 @@ def review(name, editor_report):
     # belongs (a stale shared subset file caused exactly this)
     try:
         from fontTools.ttLib import TTFont as _FT
-        cover = set(_FT(f"{OUT}/NotoJP-sub.ttf").getBestCmap().keys())
+        import os as _os
+        _fp = f"{OUT}/NotoJP-sub-{name}.ttf"
+        if not _os.path.exists(_fp):
+            _fp = f"{OUT}/NotoJP-sub.ttf"
+        cover = set(_FT(_fp).getBestCmap().keys())
         tofu = set()
         for lines in placed.values():
             for ln in lines:
