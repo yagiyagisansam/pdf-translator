@@ -965,11 +965,13 @@ def analyze_pdf(path, name, render=True):
                 figs.append({"type": "figure", "col": 0, "vector": True,
                              "x0": bx[0], "x1": bx[2], "top": bx[1],
                              "bottom": bx[3], "text": "", "order": None})
-            # small text sitting inside a vector diagram is figure content
+            # small text sitting inside a vector diagram is figure content -
+            # incl. chart titles and source notes (multi-line but small type):
+            # translating them draws Japanese over the chart's own lettering
             for b in blocks:
                 if b["type"] not in ("body", "heading", "caption") or \
                         (b.get("size") or 0) > body_size * 1.15 or \
-                        len(b["text"]) > 160:
+                        len(b["text"]) > 400:
                     continue
                 ba = max(0.0, (b["x1"] - b["x0"])) * max(0.0, (b["bottom"] - b["top"]))
                 if not ba:

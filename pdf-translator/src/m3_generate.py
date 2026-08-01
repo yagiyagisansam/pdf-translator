@@ -175,10 +175,63 @@ def _parse_tounicode(data):
     return mp
 
 
+_GLYPH_UNI = {
+    "space": " ", "period": ".", "comma": ",", "hyphen": "-", "slash": "/",
+    "percent": "%", "ampersand": "&", "colon": ":", "semicolon": ";",
+    "quotesingle": "'", "quotedbl": '"', "quoteright": "'", "quoteleft": "'",
+    "quotedblleft": '"', "quotedblright": '"', "endash": "-", "emdash": "-",
+    "parenleft": "(", "parenright": ")", "bracketleft": "[", "bracketright": "]",
+    "dollar": "$", "plus": "+", "equal": "=", "question": "?", "exclam": "!",
+    "at": "@", "underscore": "_", "asterisk": "*", "numbersign": "#",
+    "less": "<", "greater": ">", "bar": "|", "backslash": "\\",
+}
+for _i, _w in enumerate(["zero", "one", "two", "three", "four", "five",
+                         "six", "seven", "eight", "nine"]):
+    _GLYPH_UNI[_w] = str(_i)
+
+
+def _glyph_to_uni(g):
+    """Best-effort unicode for a PostScript glyph name ('a', 'zero', 'fi')."""
+    if len(g) == 1 and (g.isalpha() or g.isdigit()):
+        return g
+    if g in _GLYPH_UNI:
+        return _GLYPH_UNI[g]
+    if g in ("fi", "fl", "ff", "ffi", "ffl"):  # ligatures
+        return g
+    m = re.fullmatch(r"uni([0-9A-Fa-f]{4})", g)
+    if m:
+        cp = int(m.group(1), 16)
+        return chr(cp) if cp < 0x110000 else ""
+    return ""
+
+
+def _differences_decoder(font):
+    """{code->unicode} from /Encoding /Differences glyph names, for simple fonts
+    without /ToUnicode. Unlisted codes keep a printable-ASCII identity (the usual
+    base encodings agree with ASCII there)."""
+    enc = font.get("/Encoding")
+    if enc is None or not hasattr(enc, "get"):
+        return None
+    diffs = enc.get("/Differences")
+    if diffs is None:
+        return None
+    mp = {c: chr(c) for c in range(0x20, 0x7F)}
+    code = 0
+    for el in diffs:
+        if isinstance(el, (int, pikepdf.Object)) and str(el).lstrip("-").isdigit():
+            code = int(el)
+        else:
+            mp[code] = _glyph_to_uni(str(el).lstrip("/"))
+            code += 1
+    return mp
+
+
 def _page_font_decoders(page):
     """Return {font_name(str) -> (bytes_per_code:int, {code->unicode})} for fonts
-    on the page that carry a /ToUnicode map. Fonts without one are omitted, and
-    ops in them fall back to raw-byte matching (works for standard encodings)."""
+    on the page that carry a /ToUnicode map, plus an /Encoding /Differences
+    fallback for simple fonts without one (chart fonts in some report PDFs).
+    Fonts with neither are omitted, and ops in them fall back to raw-byte
+    matching (works for standard encodings)."""
     decoders = {}
     try:
         fonts = page.Resources.Font
@@ -187,10 +240,14 @@ def _page_font_decoders(page):
     for name, font in fonts.items():
         try:
             tu = font.get("/ToUnicode")
-            if tu is None:
+            if tu is not None:
+                width = 2 if str(font.get("/Subtype", "")) == "/Type0" else 1
+                decoders[str(name)] = (width, _parse_tounicode(tu.read_bytes()))
                 continue
-            width = 2 if str(font.get("/Subtype", "")) == "/Type0" else 1
-            decoders[str(name)] = (width, _parse_tounicode(tu.read_bytes()))
+            if str(font.get("/Subtype", "")) != "/Type0":
+                mp = _differences_decoder(font)
+                if mp:
+                    decoders[str(name)] = (1, mp)
         except Exception:
             continue
     return decoders
