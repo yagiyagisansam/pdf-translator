@@ -43,7 +43,12 @@ def _lane_bounds(blocks, lane, page_w):
     bs = [b for b in blocks if b.get("col", 0) == lane]
     if not bs:
         return None
-    return min(b["x0"] for b in bs), max(b["x1"] for b in bs)
+    # MARGIN blocks (a narrow sidebar blurb beside the main column) must not
+    # widen the lane: the editor flows them in their OWN box, and a lane that
+    # stretches to the sidebar's x0 draws the main text right over it
+    wmax = max(b["x1"] - b["x0"] for b in bs)
+    main = [b for b in bs if (b["x1"] - b["x0"]) >= 0.45 * wmax] or bs
+    return min(b["x0"] for b in main), max(b["x1"] for b in main)
 
 
 def lanes_for_page(page):

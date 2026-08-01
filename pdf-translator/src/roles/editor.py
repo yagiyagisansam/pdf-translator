@@ -274,7 +274,18 @@ def _layout_page(page, page_units, factor, font_of):
     taken = []
     for u in sorted(margin_units, key=lambda u: u["_top"]):
         draws += _flow_in_own_box(u, factor, page, taken, font_of)
-    full_obs = _obstacles_for(page, g["Lx0"], g["Lx1"])
+
+    # y-bands used by margin units are obstacles for the main flow wherever
+    # their x-ranges overlap - without this, a lane that still reaches into
+    # the sidebar zone draws main text straight over the sidebar's Japanese
+    def obs_for(x0, x1):
+        bands = list(_obstacles_for(page, x0, x1))
+        for (tx0, tx1, tt, tb) in taken:
+            if not (tx1 <= x0 or tx0 >= x1):
+                bands.append((tt, tb))
+        return _merged_bands(bands)
+
+    full_obs = obs_for(g["Lx0"], g["Lx1"])
     lh_page = max(6.0, (page.get("body_size") or 10) * factor) * LR
     for kind, payload in _bands_for_page(flow_units):
         # VERTICAL ANCHOR (layout fidelity): a band never starts ABOVE its
@@ -308,7 +319,7 @@ def _layout_page(page, page_units, factor, font_of):
                     overflow += len(units); continue
                 w = col["x1"] - col["x0"]
                 lines = _unit_lines(units, factor, w, font_of)
-                bands = _obstacles_for(page, col["x0"], col["x1"])
+                bands = obs_for(col["x0"], col["x1"])
                 d, y, rem = _flow_column(lines, col["x0"], w, y, g["bottom"], bands)
                 draws += d; overflow += len(rem); y = g["bottom"] + lh_page * PARA_GAP
                 continue
@@ -323,7 +334,7 @@ def _layout_page(page, page_units, factor, font_of):
                     if not lus:
                         continue
                     wl = col["x1"] - col["x0"]
-                    bands = _obstacles_for(page, col["x0"], col["x1"])
+                    bands = obs_for(col["x0"], col["x1"])
                     ly = g["top"]
                     for u in lus:
                         ly = max(ly, u.get("_top", ly))   # per-unit anchor
@@ -337,8 +348,8 @@ def _layout_page(page, page_units, factor, font_of):
                 continue
             w = min(wL, wR)                # wrap to the narrower
             lines = _unit_lines(units, factor, w, font_of)
-            Lbands = _obstacles_for(page, L["x0"], L["x1"])
-            Rbands = _obstacles_for(page, R["x0"], R["x1"])
+            Lbands = obs_for(L["x0"], L["x1"])
+            Rbands = obs_for(R["x0"], R["x1"])
             Lcap = _capacity(y, g["bottom"], Lbands, lh_page)
             Rcap = _capacity(y, g["bottom"], Rbands, lh_page)
             # BALANCE: split by column capacity so both columns fill to roughly
@@ -370,28 +381,52 @@ def _reflow(layout, units, floor, skip_pages=frozenset()):
     not fit, the factor shrinks in small steps toward a floor. Sizing is
     per-unit, so a tight 9pt-footnote zone shrinks only itself - it no longer
     drags a whole page of 12pt body text down to the floor size."""
+    import statistics as _st
     by_page = {}
     for u in units:
         if not u.get("target"):
             continue
-        spi, sbi = map(int, u["spans"][0].split(":"))
-        blk = layout["pages"][spi]["blocks"][sbi]
-        u["_lane"] = blk.get("col", 0)
-        u["_top"] = blk.get("top", 0.0)
-        u["_color"] = blk.get("color")
-        u["_record"] = bool(blk.get("record"))
-        import statistics as _st
         bs = []
+        src_per_page = {}          # page -> source chars of this unit's spans
         for s in u["spans"]:
             p2, b2 = map(int, s.split(":"))
             bb = layout["pages"][p2]["blocks"][b2]
             if bb.get("size"):
                 bs.append(bb["size"])
-        u["_size"] = _st.median(bs) if bs else (layout["pages"][spi].get("body_size") or 10)
-        fb = layout["pages"][spi]["blocks"][sbi]
-        u["_x0"] = fb.get("x0", 0.0)
-        u["_x1"] = fb.get("x1", 0.0)
-        by_page.setdefault(spi, []).append(u)
+            src_per_page[p2] = src_per_page.get(p2, 0) + len(bb.get("text", ""))
+        # A CROSS-PAGE unit must not dump its whole translation on its first
+        # page (the first page crams to the floor size and the next page comes
+        # out empty - a dense book page that is one long paragraph). Split the
+        # target across its span pages in proportion to each page's share of
+        # the SOURCE text, so every page keeps its own content.
+        span_pages = sorted(src_per_page)
+        total_src = sum(src_per_page.values()) or 1
+        tgt = u["target"]
+        offset = 0
+        for k, spi in enumerate(span_pages):
+            if k == len(span_pages) - 1:
+                txt = tgt[offset:]
+            else:
+                share = round(len(tgt) * src_per_page[spi] / total_src)
+                txt = tgt[offset:offset + share]
+                offset += share
+            if not txt:
+                continue
+            first = next(s for s in u["spans"]
+                         if int(s.split(":")[0]) == spi)
+            fpi, fbi = map(int, first.split(":"))
+            blk = layout["pages"][fpi]["blocks"][fbi]
+            frag = dict(u)
+            frag["target"] = txt
+            frag["_lane"] = blk.get("col", 0)
+            frag["_top"] = blk.get("top", 0.0)
+            frag["_color"] = blk.get("color")
+            frag["_record"] = bool(blk.get("record"))
+            frag["_size"] = _st.median(bs) if bs else \
+                (layout["pages"][fpi].get("body_size") or 10)
+            frag["_x0"] = blk.get("x0", 0.0)
+            frag["_x1"] = blk.get("x1", 0.0)
+            by_page.setdefault(spi, []).append(frag)
     per_page = {pi: [] for pi in range(len(layout["pages"]))}
     total_overflow = 0
     for pi, page in enumerate(layout["pages"]):

@@ -121,7 +121,10 @@ def _allowed_latin_blob(units, layout):
                 parts.append(b["text"])
     for u in units:
         parts.append(u.get("target") or u["source"])
-    return " ".join(_norm(t) for t in parts)
+    # joined WITHOUT separators: overprinted running heads ("AIM" drawn twice,
+    # 3pt apart, on AIM change pages) extract as one word ("AIMAIM") and must
+    # still match the two adjacent kept blocks
+    return "".join(_norm(t) for t in parts)
 
 
 def review(name, editor_report):

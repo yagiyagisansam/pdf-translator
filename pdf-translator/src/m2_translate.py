@@ -40,6 +40,10 @@ PROTECT_PATTERNS = [
                          r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|"
                          r"Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
                          r"Dec(?:ember)?)\.?,?\s+(\d{4})\b")),
+    # month + year with no day ("January 2008", "revised December 2015")
+    ("DATE3", re.compile(r"\b(January|February|March|April|May|June|July|"
+                         r"August|September|October|November|December)"
+                         r"\.?,?\s+(\d{4})\b")),
     # bare web/domain names (leonardo.com) - a URL pattern without the scheme.
     # The optional PATH keeps multi-segment links whole (www.faa.gov/x/y/z)
     ("SITE",  re.compile(r"\b[\w-]+(?:\.[\w-]+)*"
@@ -77,6 +81,9 @@ def protect(text):
                 s = _date_jp(m, 1, 2, 3)
             elif label == "DATE2":
                 s = _date_jp(m, 2, 1, 3)
+            elif label == "DATE3":
+                mon = _MONTH_NUM.get(m.group(1)[:3].lower())
+                s = f"{m.group(2)}年{mon}月" if mon else m.group().strip()
             else:
                 s = m.group().strip()
             if s:

@@ -811,6 +811,73 @@ def analyze_pdf(path, name, render=True):
                          "x0": im["x0"], "x1": im["x1"],
                          "top": im["top"], "bottom": im["bottom"],
                          "text": "", "order": None})
+        # figures from VECTOR DIAGRAMS: a dense cluster of curves (arcs, fans,
+        # flow-chart links) is a drawing even with no raster image (an ILS
+        # coverage fan). Its text is part of the artwork - translating it risks
+        # tight-leading interleave corruption, and stripping it deletes labels
+        # from the diagram - so such blocks become `data` (kept verbatim).
+        # Straight-line grids (tables) never qualify: a diagram needs >=6 real
+        # curves; a decorated text box (rounded corners = 4 arcs) does not.
+        curves = list(page.curves or [])[:1500]
+        if len(curves) >= 6:
+            boxes = [[c["x0"], c["top"], c["x1"], c["bottom"], 1] for c in curves]
+            merged_any = True
+            while merged_any:
+                merged_any = False
+                out = []
+                for bx in boxes:
+                    hit = None
+                    for o in out:
+                        if not (bx[2] < o[0] - 12 or o[2] < bx[0] - 12 or
+                                bx[3] < o[1] - 12 or o[3] < bx[1] - 12):
+                            hit = o
+                            break
+                    if hit:
+                        hit[0] = min(hit[0], bx[0]); hit[1] = min(hit[1], bx[1])
+                        hit[2] = max(hit[2], bx[2]); hit[3] = max(hit[3], bx[3])
+                        hit[4] += bx[4]
+                        merged_any = True
+                    else:
+                        out.append(list(bx))
+                boxes = out
+            for bx in boxes:
+                w, h = bx[2] - bx[0], bx[3] - bx[1]
+                if bx[4] < 6 or w * h < 8000 or w * h > 0.8 * pw * ph:
+                    continue
+                # a cluster that CONTAINS flowing body text is a decorated
+                # panel (background swirl, callout box), not a diagram
+                decorated = False
+                for b in blocks:
+                    ba = max(0.0, (b["x1"] - b["x0"])) * max(0.0, (b["bottom"] - b["top"]))
+                    ix = max(0.0, min(b["x1"], bx[2]) - max(b["x0"], bx[0]))
+                    iy = max(0.0, min(b["bottom"], bx[3]) - max(b["top"], bx[1]))
+                    if ba and ix * iy >= 0.7 * ba and \
+                            b.get("nlines", 1) >= 3 and \
+                            (b.get("size") or 0) >= body_size * 0.9:
+                        decorated = True
+                        break
+                if decorated:
+                    continue
+                figs.append({"type": "figure", "col": 0, "vector": True,
+                             "x0": bx[0], "x1": bx[2], "top": bx[1],
+                             "bottom": bx[3], "text": "", "order": None})
+            # small text sitting inside a vector diagram is figure content
+            for b in blocks:
+                if b["type"] not in ("body", "heading", "caption") or \
+                        (b.get("size") or 0) > body_size * 1.15 or \
+                        len(b["text"]) > 160:
+                    continue
+                ba = max(0.0, (b["x1"] - b["x0"])) * max(0.0, (b["bottom"] - b["top"]))
+                if not ba:
+                    continue
+                for f in figs:
+                    if not f.get("vector"):
+                        continue
+                    ix = max(0.0, min(b["x1"], f["x1"]) - max(b["x0"], f["x0"]))
+                    iy = max(0.0, min(b["bottom"], f["bottom"]) - max(b["top"], f["top"]))
+                    if ix * iy >= 0.7 * ba:
+                        b["type"] = "data"
+                        break
         rules = page_rules
         # drop TEXT UNDERLINES (link underlines, struck text): a rule lying
         # inside a text block's bbox belongs to the text, not the page
