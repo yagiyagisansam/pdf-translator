@@ -943,7 +943,10 @@ def analyze_pdf(path, name, render=True):
                 boxes = out
             for bx in boxes:
                 w, h = bx[2] - bx[0], bx[3] - bx[1]
-                if bx[4] < 6 or w * h < 8000 or w * h > 0.8 * pw * ph:
+                # 200-8000pt2 with many curves = a margin ICON (the TIP/
+                # CAUTION roundel): registered as a small figure so the flow
+                # never draws text across the artwork
+                if bx[4] < 6 or w * h < 200 or w * h > 0.8 * pw * ph:
                     continue
                 # a cluster that CONTAINS flowing body text is a decorated
                 # panel (background swirl, callout box), not a diagram

@@ -46,6 +46,13 @@ def _overlaps(a0, a1, b0, b1):
     return not (a1 <= b0 + 1 or b1 <= a0 + 1)
 
 
+def _badge_like(b):
+    """Icon badge lettering (tiny ALL-CAPS word stamped in a margin icon)."""
+    t = (b.get("text") or "").strip()
+    return (b.get("size") or 9) <= 6.5 and len(t) <= 8 and \
+        t.isupper() and t.isalpha()
+
+
 def _merged_bands(obstacles):
     bands = sorted((t, b) for (t, b) in obstacles)
     out = []
@@ -73,7 +80,13 @@ def _obstacles_for(page, x0, x1):
         # surviving English -> the "overlay" seen when translation partially fails.
         if (b["type"] in KEPT or b.get("_keep_en")) and \
                 _overlaps(x0, x1, b["x0"], b["x1"]):
-            obs.append((b["top"] - 2, b["bottom"] + 2))
+            if _badge_like(b):
+                # an icon's badge word sits INSIDE artwork (the TIP/CAUTION
+                # roundel) whose vector shape we cannot see - clear the whole
+                # icon, not just the lettering
+                obs.append((b["top"] - 14, b["bottom"] + 8))
+            else:
+                obs.append((b["top"] - 2, b["bottom"] + 2))
     for r in page.get("rules", []):
         if _overlaps(x0, x1, r["x0"], r["x1"]):
             obs.append((r["top"] - 3, r["bottom"] + 3))
@@ -271,7 +284,10 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
     for b in page["blocks"]:
         if (b["type"] in KEPT or b.get("_keep_en")) and \
                 _overlaps(x0, x1, b["x0"], b["x1"]):
-            bands.append((b["top"] - 2, b["bottom"] + 2))
+            if _badge_like(b):
+                bands.append((b["top"] - 14, b["bottom"] + 8))
+            else:
+                bands.append((b["top"] - 2, b["bottom"] + 2))
     for r in page.get("rules", []):
         if _overlaps(x0, x1, r["x0"], r["x1"]):
             t, bo = r["top"] - 3, r["bottom"] + 3
