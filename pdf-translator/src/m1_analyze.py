@@ -223,11 +223,21 @@ def _char_segments(chars, gutter=None):
                     # same-line segments meet edge to edge; segments whose
                     # x-ranges OVERLAP at different sizes are different
                     # elements printed on top of each other - merging would
-                    # shuffle their chars together
+                    # shuffle their chars together. A TINY segment (<=3 chars)
+                    # is a superscript/subscript that opened early and must
+                    # still rejoin its line (the char-attach guard split it
+                    # out precisely because its size differs).
                     x_ov = min(s["x1"], o["x1"]) - max(s["x0"], o["x0"])
                     if x_ov > 0.6 and s.get("sz") and o.get("sz") and \
                             max(s["sz"], o["sz"]) / min(s["sz"], o["sz"]) > 1.1:
-                        continue
+                        tiny, big = (s, o) if len(s["chars"]) <= len(o["chars"]) \
+                            else (o, s)
+                        # only a SMALLER-size tiny segment is a super/subscript
+                        # rejoining its line; a LARGER-size one is another
+                        # element's lettering arriving char by char
+                        if not (len(tiny["chars"]) <= 3
+                                and tiny["sz"] <= big["sz"]):
+                            continue
                     gap = max(o["x0"] - s["x1"], s["x0"] - o["x1"], 0.0)
                     if gap > min(max(3.2 * max(s["cw"], o["cw"]),
                                      1.6 * max(s["h"], o["h"])), 30.0):
