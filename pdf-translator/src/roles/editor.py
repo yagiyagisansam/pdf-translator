@@ -310,14 +310,38 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
     # cascades down into the next box's area and the boxes' texts pile up.
     # Shrink (bounded - readability floor and 62% of source) until the
     # wrapped height roughly matches the source height, THEN flow.
-    _w0 = max(12.0, x1 - x0)
     _src_sz = u.get("_size") or size
     _src_h = max(1, u.get("_nlines", 1)) * _src_sz * 1.3 + 2
     _floor = max(4.6, 0.62 * _src_sz)
-    while size > _floor and \
+
+    def _shrunk(width):
+        s = _unit_size(u, factor)
+        while s > _floor and \
+                len(m3._wrap(u["target"], font, s, width)) * s * LR \
+                > _src_h * 1.15:
+            s -= 0.25
+        return s
+
+    _w0 = max(12.0, x1 - x0)
+    size = _shrunk(_w0)
+    if u.get("_label") and size <= _floor + 0.26 and \
             len(m3._wrap(u["target"], font, size, _w0)) * size * LR \
-            > _src_h * 1.15:
-        size -= 0.25
+            > _src_h * 1.3:
+        # a Japanese label can be WIDER than its English box (a katakana
+        # legend entry): before accepting fragment-wrapping at the floor
+        # size, widen rightward - clamped at the nearest element and 2.5x
+        # the source width - and re-fit
+        bottom_est = u["_top"] + _src_h + 4
+        lim = min(page["width"] * 0.97, x0 + 2.5 * max(_w0, 10.0))
+        for b in page["blocks"]:
+            if b["x0"] > x1 + 1 and b.get("text", "").strip() and \
+                    not (b["bottom"] <= u["_top"] - 1
+                         or b["top"] >= bottom_est):
+                lim = min(lim, max(b["x0"] - 3, x0 + 12))
+        if lim > x0 + _w0 + 4:
+            x1 = lim
+            _w0 = max(12.0, x1 - x0)
+            size = _shrunk(_w0)
     lh = size * LR
     # figures and KEPT TEXT are real obstacles always (a margin icon's badge
     # word must never be overdrawn); only RULE bands get the thin-band

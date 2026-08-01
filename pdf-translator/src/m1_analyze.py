@@ -1145,8 +1145,11 @@ def analyze_pdf(path, name, render=True):
                     sc = c.get("size") or sa
                     if max(sa, sc) / max(min(sa, sc), 0.1) > 1.2:
                         continue
+                    # tight pitch only: a circle caption's lines nearly touch
+                    # (gap well under half the size); LEGEND ROWS are spaced
+                    # a full line apart and must stay separate entries
                     gap = c["top"] - a["bottom"]
-                    if gap > 0.7 * max(sa, sc) or gap < -2.0:
+                    if gap > 0.35 * max(sa, sc) or gap < -2.0:
                         continue
                     ctr_a = (a["x0"] + a["x1"]) / 2
                     ctr_c = (c["x0"] + c["x1"]) / 2
