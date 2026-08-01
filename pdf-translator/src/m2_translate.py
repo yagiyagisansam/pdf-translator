@@ -321,7 +321,16 @@ def build_units(layout):
             last = blk(u["spans"][-1])
             if not last.get("continues_to_next_page"):
                 break
-            nxt = cont_by_page.get(int(u["spans"][-1].split(":")[0]) + 2)  # 1-based next page
+            lpi = int(u["spans"][-1].split(":")[0])
+            # slides/spreads: each landscape page is independent - the linear
+            # merge already refuses cross-page joins there, and this fix-up
+            # must not reintroduce them (a 12pt footer bullet chained onto the
+            # next slide's 28pt contact block and dragged it off position)
+            if pages[lpi]["width"] > pages[lpi]["height"] or \
+                    (lpi + 1 < len(pages) and
+                     pages[lpi + 1]["width"] > pages[lpi + 1]["height"]):
+                break
+            nxt = cont_by_page.get(lpi + 2)  # 1-based next page
             if nxt is None or nxt is u or nxt["uid"] in consumed:
                 break
             seg = nxt["source"].lstrip()

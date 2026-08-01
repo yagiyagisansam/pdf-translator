@@ -613,7 +613,8 @@ def generate(name, src_path):
         # Japanese label slightly wider than the English does not wrap
         # ("ラテンアメリ/カ") and break the row alignment
         if len(blocks_in_region) == 1 and blocks_in_region[0].get("record"):
-            lim = layout["pages"][pi]["width"] * 0.97
+            lim = min(layout["pages"][pi]["width"] * 0.97,
+                      max((ob["x1"] for ob in blocks_all), default=x1) + 4)
             for ob in blocks_all:
                 if id(ob) in own or not ob.get("text", "").strip():
                     continue
@@ -861,6 +862,12 @@ def generate(name, src_path):
         rec_one = nlines == 1 and len(u["spans"]) == 1 and \
             layout["pages"][int(u["spans"][0].split(":")[0])]["blocks"][
                 int(u["spans"][0].split(":")[1])].get("record")
+        # short single-line labels ("Package 3: NDED VCIC" on a slide) also
+        # stay one line: wrapping their overflow drops a fragment onto
+        # whatever sits below (a running footer) - shrinking keeps position
+        if not rec_one and nlines == 1 and len(u["spans"]) == 1 and \
+                len(u["target"] or "") <= 34:
+            rec_one = True
         _flow_unit_across_regions(u["target"], u["type"], regs, layout,
                                   per_page_draws, src_size=src_size, uid=uid,
                                   src_lines=nlines, color=color,

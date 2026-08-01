@@ -229,7 +229,10 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
         # wrap and shift every row below it), shrink to ONE line, and draw at
         # the source y.
         bottom_est = u["_top"] + max(size, u.get("_size") or size) * 1.25
-        right = page["width"] * 0.97
+        # never extend past the page's own text band - a cell stretched to the
+        # page margin draws lines QA rightly flags as outside the source band
+        right = min(page["width"] * 0.97,
+                    max((b["x1"] for b in page["blocks"]), default=x1) + 4)
         for b in page["blocks"]:
             if b["x0"] >= x1 - 1 and b.get("text", "").strip() and \
                     not (b["bottom"] <= u["_top"] + 1 or b["top"] >= bottom_est):
