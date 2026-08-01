@@ -260,14 +260,27 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
         taken.append((x0, x0 + width, u["_top"] - 1, y + 1))
         return draws
     lh = size * LR
-    bands = list(_obstacles_for(page, x0, x1))
+    # figures and KEPT TEXT are real obstacles always (a margin icon's badge
+    # word must never be overdrawn); only RULE bands get the thin-band
+    # exemption, because a table row rule at the cell's edge must not push the
+    # cell's first line out of its row
+    bands = []
+    for f in page.get("figures", []):
+        if _overlaps(x0, x1, f["x0"], f["x1"]):
+            bands.append((f["top"] - 6, f["bottom"] + 6))
+    for b in page["blocks"]:
+        if (b["type"] in KEPT or b.get("_keep_en")) and \
+                _overlaps(x0, x1, b["x0"], b["x1"]):
+            bands.append((b["top"] - 2, b["bottom"] + 2))
+    for r in page.get("rules", []):
+        if _overlaps(x0, x1, r["x0"], r["x1"]):
+            t, bo = r["top"] - 3, r["bottom"] + 3
+            if bo - t <= 12.0 and t < u["_top"] + lh and bo > u["_top"] - 2:
+                continue
+            bands.append((t, bo))
     for (tx0, tx1, tt, tb) in taken:
         if not (tx1 <= x0 or tx0 >= x1):
             bands.append((tt, tb))
-    # a THIN band (a table row rule at the cell's edge) must not push the
-    # cell's first line out of its row - only substantial obstacles move text
-    bands = [(t, bo) for (t, bo) in bands
-             if not (bo - t <= 12.0 and t < u["_top"] + lh and bo > u["_top"] - 2)]
     bands = _merged_bands(bands)
     width = max(12.0, x1 - x0)
     wrapped = m3._wrap(u["target"], font, size, width)

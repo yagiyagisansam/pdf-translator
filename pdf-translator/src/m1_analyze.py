@@ -74,6 +74,13 @@ def _char_segments(chars, gutter=None):
             ov = min(s["bottom"], c["bottom"]) - max(s["top"], c["top"])
             if ov < 0.55 * min(ch_h, s["h"]):
                 continue
+            # a char far off the segment's size is a DIFFERENT element (an
+            # icon's 5.4pt badge word grazing a 10pt body line) - superscripts
+            # (~70% of body) stay within the ratio
+            cs = c.get("size") or 0
+            ss = s.get("sz") or 0
+            if cs and ss and max(cs, ss) / min(cs, ss) > 1.6:
+                continue
             gap = max(c["x0"] - s["x1"], s["x0"] - c["x1"], 0.0)
             # word spaces are ~0.5x char width; column/label gaps are far larger.
             # The cap keeps a stretched (justified) space inside the line while a
@@ -99,7 +106,8 @@ def _char_segments(chars, gutter=None):
             open_segs.append({
                 "chars": [c], "x0": c["x0"], "x1": c["x1"],
                 "top": c["top"], "bottom": c["bottom"],
-                "h": ch_h, "cw": (c["x1"] - c["x0"]) or mw})
+                "h": ch_h, "cw": (c["x1"] - c["x0"]) or mw,
+                "sz": c.get("size") or 0})
         else:
             s = best
             s["chars"].append(c)
@@ -108,6 +116,7 @@ def _char_segments(chars, gutter=None):
             # running medians keep the attach thresholds stable within the line
             s["h"] = statistics.median(x["bottom"] - x["top"] for x in s["chars"]) or 1.0
             s["cw"] = statistics.median(x["x1"] - x["x0"] for x in s["chars"]) or mw
+            s["sz"] = statistics.median(x.get("size") or 0 for x in s["chars"])
             # A raised superscript (or a symbol like ±) can open its own segment
             # BEFORE its line's lower chars arrive (chars stream in top order);
             # the line then grows toward it from the side. Merge open segments
@@ -120,6 +129,9 @@ def _char_segments(chars, gutter=None):
                         continue
                     ov = min(s["bottom"], o["bottom"]) - max(s["top"], o["top"])
                     if ov < 0.55 * min(s["h"], o["h"]):
+                        continue
+                    if s.get("sz") and o.get("sz") and \
+                            max(s["sz"], o["sz"]) / min(s["sz"], o["sz"]) > 1.6:
                         continue
                     gap = max(o["x0"] - s["x1"], s["x0"] - o["x1"], 0.0)
                     if gap > min(max(3.2 * max(s["cw"], o["cw"]),
@@ -135,6 +147,8 @@ def _char_segments(chars, gutter=None):
                         x["bottom"] - x["top"] for x in s["chars"]) or 1.0
                     s["cw"] = statistics.median(
                         x["x1"] - x["x0"] for x in s["chars"]) or mw
+                    s["sz"] = statistics.median(
+                        x.get("size") or 0 for x in s["chars"])
                     open_segs.remove(o)
                     merged = True
                     break
@@ -169,8 +183,14 @@ def cluster_lines(chars, gutter=None):
             # never orphan a leading list/heading marker ("•", "3.", "[12]") -
             # its text always starts at a shared edge (hanging indent)
             head = "".join(x["text"] for x in cur).strip()
+            # a SHORT single-word head ("Other| penalties.") is usually a bold
+            # run-in lead followed by an em-quad, not an island boundary -
+            # demand a clearly-wider gap before splitting it off. A table
+            # label cell ("EMEA | 3,240") still splits: its gap is huge.
+            short_head = " " not in head and len(head) <= 12
+            need = max(4.0, (2.4 if short_head else 1.2) * cw)
             if not marker_re.match(head) and at_edge(c["x0"]) \
-                    and c["x0"] - cur[-1]["x1"] >= max(4.0, 1.2 * cw):
+                    and c["x0"] - cur[-1]["x1"] >= need:
                 out.append(cur); cur = [c]
             else:
                 cur.append(c)
@@ -407,6 +427,12 @@ def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
         return "title"
     if _headish(t) or (b["bold"] and b["size"] >= body_size * 1.05 and len(t) < 60):
         return "heading"
+    # ICON BADGE lettering ("CAUTION" / "TIP" stamped inside a margin icon):
+    # a tiny ALL-CAPS standalone word far below body size is artwork, not
+    # prose - translating it draws Japanese over the icon's baked-in word
+    if b.get("nlines", 1) == 1 and (b.get("size") or 9) <= 6.5 and \
+            len(t.strip()) <= 8 and t.strip().isupper():
+        return "data"
     # Mostly-UPPERCASE short blocks are headings even at body size and even
     # without a bold flag ("h. 7-1-1. NATIONAL WEATHER SERVICE ..." in
     # regulation manuals mark headings by CAPS alone) - typed as body they
@@ -524,6 +550,14 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             record_rows.add(id(l))
         if why == "list":
             list_rows.add(id(l))
+        # ICON BADGE lettering ("CAUTION"/"TIP" stamped in a margin icon):
+        # tiny ALL-CAPS word far below body size. Sealed so it can never be
+        # absorbed into the neighbouring paragraph, where it would translate
+        # inline and lose its data classification.
+        t = l["text"].strip()
+        if l.get("size") and l["size"] <= 6.5 and len(t) <= 8 and \
+                t.isupper() and t.isalpha():
+            record_rows.add(id(l))
     open_blocks, done = [], []
     for l in ls:
         lh = (l["bottom"] - l["top"]) or 1.0

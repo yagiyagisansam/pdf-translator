@@ -338,13 +338,13 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         # matching, drop the matched prefix (if substantial) and restart.
         texts = [(op_uni[idx] if op_uni[idx] is not None else _op_text(ops[idx]))
                  for idx in run]
-        pos = 0
-        while pos < len(run):
+        rp = 0
+        while rp < len(run):
             acc = ""
             last_ok = None
-            e = pos
-            while e < len(run):
-                cand = acc + texts[e]
+            re_ = rp
+            while re_ < len(run):
+                cand = acc + texts[re_]
                 nj = _norm_txt(cand)
                 if nj and not _matches_blob(nj, kill_blob, blob_drop,
                                             _norm_txt_drop(cand),
@@ -355,18 +355,18 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                 if len(nj) >= 8 and _matches_blob(nj, kill_blob, blob_drop,
                                                   _norm_txt_drop(cand),
                                                   blob_nodigit=blob_nodigit):
-                    last_ok = e
-                e += 1
+                    last_ok = re_
+                re_ += 1
             if last_ok is not None:
-                for m2 in range(pos, last_ok + 1):
+                for m2 in range(rp, last_ok + 1):
                     idx = run[m2]
                     raw = texts[m2].strip()
                     if raw and _norm_txt(raw) in keep_tokens:
                         continue
                     dropped[idx] = True
-                pos = last_ok + 1
+                rp = last_ok + 1
             else:
-                pos += 1
+                rp += 1
         k = j
     for i in text_idx:
         if dropped[i]: continue
