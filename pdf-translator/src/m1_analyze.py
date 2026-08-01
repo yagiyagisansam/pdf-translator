@@ -58,22 +58,29 @@ def _char_segments(chars, gutter=None):
                 for dx in (0, 1, -1) for dy in (0, 1, -1)]
         if any(k in seen for k in keys):
             continue
-        # OFFSET doubles: faux-bold re-draws a whole run shifted by up to ~2pt
-        # diagonally - too far for the buckets above. A real repeated letter
-        # ("ll") sits on the SAME baseline exactly one advance away, so a same-
-        # glyph neighbour with a vertical offset (or well under one advance
-        # horizontally) can only be a double-print.
+        # OFFSET doubles: faux-bold / shadow layers re-draw a whole run shifted
+        # by up to ~2.5pt diagonally (sometimes at a hair different scale) -
+        # too far for the buckets above. A real repeated letter ("ll") sits on
+        # the SAME baseline exactly one advance away, and a real next-line char
+        # sits a full line height (>= ~1x size) below - so a same-glyph
+        # neighbour with a small-but-nonzero vertical offset (or well under one
+        # advance horizontally) can only be a double-print.
         adv = c["x1"] - c["x0"]
+        sz = c.get("size") or (c["bottom"] - c["top"]) or 8.0
+        dy_lim = min(3.0, max(1.2, 0.35 * sz))
+        dx_lim = min(3.0, max(2.0, 0.30 * sz))
         prev = recent.get(c["text"], [])
-        prev = [p for p in prev if p[1] >= c["top"] - 1.3]
+        prev = [p for p in prev if p[1] >= c["top"] - 3.2]
         dup = any(
-            (0.05 < abs(c["top"] - p[1]) <= 1.2 and abs(c["x0"] - p[0]) <= 2.0)
+            (0.05 < abs(c["top"] - p[1]) <= dy_lim
+             and abs(c["x0"] - p[0]) <= dx_lim
+             and max(sz, p[3]) / max(min(sz, p[3]), 0.1) <= 1.15)
             or (abs(c["top"] - p[1]) <= 0.05
                 and abs(c["x0"] - p[0]) <= 0.45 * max(adv, p[2]))
             for p in prev)
         if dup:
             continue
-        prev.append((c["x0"], c["top"], adv))
+        prev.append((c["x0"], c["top"], adv, sz))
         recent[c["text"]] = prev
         seen.add(keys[0])
         deduped.append(c)
@@ -1045,6 +1052,12 @@ def analyze_pdf(path, name, render=True):
     def norm(t): return re.sub(r"[\d\s]", "", t).lower()[:40]
 
     def in_margin(b, p):
+        # furniture is SMALL text: a chapter divider's 24pt display title
+        # repeats the same words as the chapter's running heads, but it is the
+        # page's content, not furniture - never seal display-size text
+        if b.get("size") and p.get("body_size") and \
+                b["size"] > p["body_size"] * 1.3:
+            return False
         return (b["top"] < p["height"] * 0.15
                 or b["bottom"] > p["height"] * 0.88)
     topcnt = Counter()
