@@ -313,6 +313,37 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         return len(norm)<=3 or bool(_FRAG_RE.match(raw_sep))
 
     keep_tokens = kwargs.get("keep_tokens") or frozenset()
+    # CHAR-RUN SWEEP: a line drawn as PER-CHARACTER ops (tracked/justified
+    # microtypography) is invisible to the per-op matcher (every op is one
+    # letter) and longer than the bounded fragment sweep allows - it survived
+    # as English struck across the Japanese. Concatenate each maximal run of
+    # consecutive fragment ops and drop the WHOLE RUN when its joined text
+    # matches the kill blob; a table grid's cells joined together are not in
+    # the blob, so tables keep their protection.
+    k = 0
+    tn = len(text_idx)
+    while k < tn:
+        idx0 = text_idx[k]
+        if dropped[idx0] or not _is_frag(idx0):
+            k += 1
+            continue
+        j = k
+        while j < tn and (not dropped[text_idx[j]]) and _is_frag(text_idx[j]):
+            j += 1
+        run = [text_idx[m] for m in range(k, j)]
+        joined = "".join((op_uni[idx] if op_uni[idx] is not None
+                          else _op_text(ops[idx])) for idx in run)
+        nj = _norm_txt(joined)
+        if len(nj) >= 8 and _matches_blob(nj, kill_blob, blob_drop,
+                                          _norm_txt_drop(joined),
+                                          blob_nodigit=blob_nodigit):
+            for idx in run:
+                raw = (op_uni[idx] if op_uni[idx] is not None
+                       else _op_text(ops[idx])).strip()
+                if raw and _norm_txt(raw) in keep_tokens:
+                    continue
+                dropped[idx] = True
+        k = j
     for i in text_idx:
         if dropped[i]: continue
         if not _is_frag(i): continue
