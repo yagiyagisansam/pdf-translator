@@ -94,15 +94,32 @@ def _char_segments(chars, gutter=None):
         t = unicodedata.normalize("NFKC",
                                   "".join(x["text"] for x in r["chars"]))
         key = re.sub(r"[^0-9a-z]", "", t.lower())
-        if len(key) < 6:
+        # ALL-CAPS box headers ("UAS") are short but distinctive - their
+        # shadow copies must dedupe too, or the survivors tear neighbouring
+        # words apart ("Operato|r")
+        min_key = 3 if t.strip().isupper() and t.strip().isalnum() else 6
+        if len(key) < min_key:
             continue
         szs = [x.get("size") or 0 for x in r["chars"] if x.get("size")]
         rsz = statistics.median(szs) if szs else 8.0
         dup = False
         for (px0, ptop, psz) in kept_runs.get(key, ()):
             ratio = max(rsz, psz) / max(min(rsz, psz), 0.1)
-            if 1.02 <= ratio <= 1.35 and abs(r["x0"] - px0) <= 8.0 and \
-                    abs(r["top"] - ptop) <= 1.8 * max(rsz, psz):
+            dx = abs(r["x0"] - px0)
+            dy = abs(r["top"] - ptop)
+            if dx > 8.0:
+                continue
+            # scaled copy: sizes differ a little, offset up to ~2 line pitches
+            if 1.02 <= ratio <= 1.35 and dy <= 1.8 * max(rsz, psz):
+                dup = True
+                break
+            # SAME-SIZE shadow copy (PowerPoint text shadow): identical text a
+            # hair away. A real repeated line (a table's recurring cell) sits
+            # a full row pitch below (dy >= ~1x size) - excluded by the tight
+            # dy window; a same-line repeated word sits >8pt right - excluded
+            # by the dx cap.
+            if ratio < 1.02 and dy <= 0.6 * max(rsz, psz) and \
+                    (dx > 0.05 or dy > 0.05):
                 dup = True
                 break
         if dup:
@@ -233,16 +250,26 @@ def _char_segments(chars, gutter=None):
                     # still rejoin its line (the char-attach guard split it
                     # out precisely because its size differs).
                     x_ov = min(s["x1"], o["x1"]) - max(s["x0"], o["x0"])
+                    tiny, big = (s, o) if len(s["chars"]) <= len(o["chars"]) \
+                        else (o, s)
+                    tiny_sup = len(tiny["chars"]) <= 3 and \
+                        (tiny.get("sz") or 0) <= (big.get("sz") or 0)
                     if x_ov > 0.6 and s.get("sz") and o.get("sz") and \
                             max(s["sz"], o["sz"]) / min(s["sz"], o["sz"]) > 1.1:
-                        tiny, big = (s, o) if len(s["chars"]) <= len(o["chars"]) \
-                            else (o, s)
                         # only a SMALLER-size tiny segment is a super/subscript
                         # rejoining its line; a LARGER-size one is another
                         # element's lettering arriving char by char
-                        if not (len(tiny["chars"]) <= 3
-                                and tiny["sz"] <= big["sz"]):
+                        if not tiny_sup:
                             continue
+                    # BASELINE guard: real same-line neighbours share a
+                    # baseline. A large glue char ("…" between two slide
+                    # boxes) can pass the 55% overlap test against a line
+                    # from a DIFFERENT row and bridge the rows into one -
+                    # require the bottoms to agree (superscripts exempt)
+                    if not tiny_sup and \
+                            abs(s["bottom"] - o["bottom"]) > 0.45 * max(
+                                s.get("sz") or 8.0, o.get("sz") or 8.0):
+                        continue
                     gap = max(o["x0"] - s["x1"], s["x0"] - o["x1"], 0.0)
                     if gap > min(max(3.2 * max(s["cw"], o["cw"]),
                                      1.6 * max(s["h"], o["h"])), 30.0):
@@ -504,7 +531,9 @@ def _is_contact_line(text):
             if len([w for w in rest.split() if re.search(r"[A-Za-z]", w)]) <= 3:
                 return True
     return False
-REF_RE = re.compile(r"^\d+\.\s+[A-Z][a-z]+")  # ref list "1. Sheppard JM..."
+# ref list entries: "1. Sheppard JM..." (numbered) or "[22] Federal..."
+# (AIAA bracket style) - both gated behind an explicit References heading
+REF_RE = re.compile(r"^(?:\d+\.\s+|\[\d+\]\s*)[A-Z][A-Za-z]+")
 
 def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
     t = b["text"]
@@ -1119,8 +1148,12 @@ def analyze_pdf(path, name, render=True):
                     iy = max(0.0, min(b["bottom"], f["bottom"]) - max(b["top"], f["top"]))
                     if ix * iy >= 0.7 * ba:
                         t = b["text"].strip()
-                        if len(t) <= 120 and re.search(r"[A-Za-z]{3,}", t) \
-                                and not _numericish(t):
+                        if len(t) <= 120 and not _numericish(t) and (
+                                re.search(r"[A-Za-z]{3,}", t)
+                                or (t.isalpha() and len(t) <= 2)):
+                            # 1-2 letter alpha blocks are torn word tails
+                            # (PowerPoint wrapped "Operato"/"r") - typed
+                            # label so the stack merge can reunite them
                             b["type"] = "label"
                             b["label"] = True
                         else:
@@ -1157,8 +1190,15 @@ def analyze_pdf(path, name, render=True):
                     if abs(ctr_a - ctr_c) > max(8.0, 1.5 * sa) or \
                             ox < 0.3 * min(a["x1"] - a["x0"], c["x1"] - c["x0"]):
                         continue
-                    j = "" if a["text"].rstrip().endswith("-") else " "
-                    a["text"] = a["text"].rstrip() + j + c["text"].strip()
+                    at = a["text"].rstrip()
+                    ct = c["text"].strip()
+                    # a trailing hyphen, or a TORN word tail (PowerPoint wraps
+                    # mid-word without a hyphen: "Operato" / "r"), joins
+                    # without a space
+                    torn = len(ct) <= 2 and at[-1:].islower() and \
+                        ct[:1].islower()
+                    j = "" if at.endswith("-") or torn else " "
+                    a["text"] = at + j + ct
                     a["x0"] = min(a["x0"], c["x0"])
                     a["x1"] = max(a["x1"], c["x1"])
                     a["bottom"] = max(a["bottom"], c["bottom"])

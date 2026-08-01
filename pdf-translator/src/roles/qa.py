@@ -150,6 +150,29 @@ def review(name, editor_report):
         defects.append({"role": "translator", "kind": "placeholder_leak",
                         "detail": f"unrestored ⟦Tn⟧ in units {leaked[:8]}",
                         "param": "reengine"})
+    # TOFU gate: every non-ASCII char the editor drew must exist in the
+    # embedding subset font, or the reader sees a notdef box where a kanji
+    # belongs (a stale shared subset file caused exactly this)
+    try:
+        from fontTools.ttLib import TTFont as _FT
+        import os as _os
+        _fp = f"{OUT}/NotoJP-sub-{name}.ttf"
+        if not _os.path.exists(_fp):
+            _fp = f"{OUT}/NotoJP-sub.ttf"
+        cover = set(_FT(_fp).getBestCmap().keys())
+        tofu = set()
+        for lines in placed.values():
+            for ln in lines:
+                for ch in ln.get("text", ""):
+                    if ord(ch) > 127 and ord(ch) not in cover:
+                        tofu.add(ch)
+        if tofu:
+            defects.append({"role": "editor", "kind": "missing_glyph",
+                            "detail": "font subset lacks drawn chars: "
+                                      + "".join(sorted(tofu))[:40],
+                            "param": "restrip"})
+    except Exception:
+        pass
 
     ref_pages = set()
     for p in layout["pages"]:
@@ -160,6 +183,18 @@ def review(name, editor_report):
     # low to reflow) are by-design English - not residual-strip defects
     ref_pages |= set(editor_report.get("skip_pages") or [])
     blob = _allowed_latin_blob(units, layout)
+    # ROTATED text (chart axis labels, table headers set at 90°) is excluded
+    # from translation BY DESIGN - M1 drops non-upright chars, so it appears
+    # in no block and no unit - it stays on the page and is not residual
+    try:
+        import pdfplumber
+        with pdfplumber.open(out_path) as _pdf:
+            for _pg in _pdf.pages:
+                blob += _norm("".join(c["text"] for c in _pg.chars
+                                      if not c.get("upright", True)))
+                _pg.flush_cache(); _pg.get_textmap.cache_clear()
+    except Exception:
+        pass
     residual = []
     for i, txt in enumerate(_pdf_pages(out_path), start=1):
         if i in ref_pages:

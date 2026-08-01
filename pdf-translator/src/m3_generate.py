@@ -21,10 +21,19 @@ from pypdf import PdfReader, PdfWriter
 
 from config import OUT, ensure_out, resolve_pdf
 
-def _register_fonts():
+def _register_fonts(name=None):
+    """Register the subset fonts, preferring the PER-DOCUMENT files (the
+    shared ones can be overwritten by a concurrent run for another doc)."""
     reg = {}
     rpath = f"{OUT}/NotoJP-sub.ttf"
     bpath = f"{OUT}/NotoJP-Bold-sub.ttf"
+    if name:
+        pr = f"{OUT}/NotoJP-sub-{name}.ttf"
+        pb = f"{OUT}/NotoJP-Bold-sub-{name}.ttf"
+        if os.path.exists(pr):
+            rpath = pr
+        if os.path.exists(pb):
+            bpath = pb
     pdfmetrics.registerFont(TTFont("NotoJP", rpath)); reg["r"] = rpath
     try:
         pdfmetrics.registerFont(TTFont("NotoJP-Bold", bpath)); reg["b"] = bpath
@@ -357,6 +366,16 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                              blob_drop, _norm_txt_drop(t),
                              blob_nodigit=blob_nodigit):
                 dropped[i]=True
+            # a PURE LIGATURE op ('ﬂ' of "...triﬂuoro..." drawn as its own
+            # op) normalizes to 2 chars - under the >=3 guard - and survives
+            # as a stray fragment over the Japanese. The raw glyph may be the
+            # ligature codepoint OR its ToUnicode expansion ("fl"); lowercase
+            # distinguishes it from a kept ASCII cell like "FL". Kill it when
+            # its expansion appears in the blob.
+            elif t and t.strip() in ("ﬁ", "ﬂ", "ﬀ", "ﬃ", "ﬄ",
+                                     "fi", "fl", "ff", "ffi", "ffl") and \
+                    _norm_txt(t) and _norm_txt(t) in kill_blob:
+                dropped[i]=True
     text_idx=[i for i in range(len(ops)) if is_text[i]]
     pos={idx:k for k,idx in enumerate(text_idx)}
 
@@ -435,6 +454,27 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         if raw_i and _norm_txt(raw_i) in keep_tokens:
             continue
         k=pos[i]
+        # SEAM TAIL/HEAD: the op is the torn end of a word whose main op was
+        # dropped ("Operato"|"r"): joined with the dropped neighbour it
+        # matches the blob even though the fragment alone never can
+        if k-1 >= 0 and dropped[text_idx[k-1]]:
+            pt=(op_uni[text_idx[k-1]] if op_uni[text_idx[k-1]] is not None
+                else _op_text(ops[text_idx[k-1]]))
+            nj=_norm_txt(pt+raw_i)
+            if len(nj) >= 4 and _matches_blob(nj, kill_blob, blob_drop,
+                                              _norm_txt_drop(pt+raw_i),
+                                              blob_nodigit=blob_nodigit):
+                dropped[i]=True
+                continue
+        if k+1 < len(text_idx) and dropped[text_idx[k+1]]:
+            nt=(op_uni[text_idx[k+1]] if op_uni[text_idx[k+1]] is not None
+                else _op_text(ops[text_idx[k+1]]))
+            nj=_norm_txt(raw_i+nt)
+            if len(nj) >= 4 and _matches_blob(nj, kill_blob, blob_drop,
+                                              _norm_txt_drop(raw_i+nt),
+                                              blob_nodigit=blob_nodigit):
+                dropped[i]=True
+                continue
         # Scan left/right SKIPPING over consecutive fragment ops to the nearest
         # NON-fragment text op. Drop this fragment only if the body text bounding
         # its run was itself dropped on BOTH sides - i.e. it is wedged inside a
@@ -709,7 +749,7 @@ def _remaining_after(text, taken_lines):
 # ---- main pipeline -------------------------------------------------------------
 def generate(name, src_path):
     ensure_out()
-    _register_fonts()
+    _register_fonts(name)
     units=json.load(open(f"{OUT}/{name}_bilingual.json"))
     sanitize_targets(units)
     layout=json.load(open(f"{OUT}/{name}_layout.json"))
