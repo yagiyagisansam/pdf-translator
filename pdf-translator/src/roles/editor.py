@@ -866,17 +866,29 @@ def build(name, src_path, floor=6.0):
         kill[pi] += "|" + "".join(m3._norm_txt(b["text"]) for b in rows)
         kill_drop[pi] += "|" + "".join(m3._norm_txt_drop(b["text"]) for b in rows)
     pdf = Pdf.open(src_path)
+    displaced_pages = {}
     for pi, page in enumerate(pdf.pages):
         if kill.get(pi):
+            dl = []
             m3.remove_text_by_content(
                 page, pdf, kill[pi], kill_blob_drop=kill_drop[pi],
                 keep_tokens=m3.keep_tokens_for(layout["pages"][pi], pi,
-                                               unit_for_block))
+                                               unit_for_block),
+                displaced=dl)
+            if dl:
+                displaced_pages[pi] = dl
     stripped = f"{OUT}/{name}_stripped.pdf"
     pdf.save(stripped); pdf.close()
 
     # 2) reflow (skip the mostly-untranslated pages so they stay original English)
     per_page, overflow = _reflow(layout, units, floor, skip_pages)
+    for pi, ds in m3.redraw_displaced(displaced_pages, layout).items():
+        for d in ds:
+            per_page.setdefault(pi, []).append({
+                "x": d["x"], "y_top": d["y_top"], "size": d["size"],
+                "font": "NotoJP", "line": d["text"],
+                "width": max(20.0, len(d["text"]) * d["size"]),
+                "justify": False, "color": tuple(d["color"])})
 
     placed = {}
     for pi, draws in per_page.items():
