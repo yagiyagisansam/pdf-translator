@@ -39,6 +39,44 @@ def _echoish(s: str) -> bool:
     return latin > 0.45 * max(len(s), 1)
 
 
+def _sentence_translate(translator, unit, item):
+    """Translate a unit SENTENCE BY SENTENCE with per-sentence validation: each
+    sentence's placeholders must round-trip (or get inlined+digit-verified on a
+    one-shot retry) and each output must actually be Japanese. Long IR/legal
+    paragraphs with dozens of ⟦Tn⟧ reliably lose several on the free endpoint
+    as one request; per-sentence, drops are rare and repairable. Returns the
+    joined Japanese or None."""
+    parts = [p for p in re.split(r"(?<=[.!?;:])\s+", item["text"]) if p.strip()]
+    if len(parts) < 2:
+        return None
+    tok_re = re.compile(r"⟦T\d+⟧")
+    outs = []
+    for p in parts:
+        try:
+            o = translator.translate_batch([{"text": p, "kind": item["kind"]}])[0]
+        except Exception:
+            o = None
+        if o and _placeholders_ok(p, o) and not _echoish(o):
+            outs.append(o)
+            continue
+        # inline this sentence's tokens and retry once (values are literals
+        # whose digits we can verify)
+        keys = tok_re.findall(p)
+        q = p
+        for k in keys:
+            q = q.replace(k, unit["tokens"].get(k, ""))
+        try:
+            o2 = translator.translate_batch([{"text": q, "kind": item["kind"]}])[0]
+        except Exception:
+            o2 = None
+        if o2 and not _echoish(o2) and \
+                _digits_ok([unit["tokens"].get(k, "") for k in keys], o2):
+            outs.append(o2)
+            continue
+        return None
+    return " ".join(outs)
+
+
 def _placeholders_ok(masked_src: str, masked_ja: str) -> bool:
     """The translation must contain exactly the placeholders of the source
     (order-free): a lost ⟦Tn⟧ silently drops a number/citation on restore."""
@@ -48,13 +86,21 @@ def _placeholders_ok(masked_src: str, masked_ja: str) -> bool:
 
 def _digits_ok(token_values, out: str) -> bool:
     """Every numeric run inside the protected token values must appear in the
-    output at least as often (multiset containment)."""
-    from collections import Counter
-    need = Counter()
+    output. Japanese legitimately REGROUPS scale ("80 million" -> "8,000万",
+    "13.4 billion" -> "134億"), so runs are compared by SIGNIFICAND: separators
+    stripped, trailing zeros ignored (bounded, so a dropped digit still fails)."""
+    def sig(s):
+        d = re.sub(r"\D", "", s)
+        return d.rstrip("0") or ("0" if d else ""), len(d)
+
+    outs = [sig(r) for r in re.findall(r"[\d.,]+", out)]
     for v in token_values:
-        need.update(re.findall(r"\d+(?:\.\d+)?", v))
-    have = Counter(re.findall(r"\d+(?:\.\d+)?", out))
-    return all(have[d] >= c for d, c in need.items())
+        dv, lv = sig(v)
+        if not dv and lv == 0:
+            continue
+        if not any(ro == dv and abs(lo - lv) <= 4 for ro, lo in outs):
+            return False
+    return True
 
 
 def _cache_key(engine: str, item: dict) -> str:
@@ -161,20 +207,11 @@ def run(name: str, engine: str = "mock"):
             empty = [i for i in miss
                      if not results[i] and items[i]["text"].strip()]
             for i in empty:
-                parts = re.split(r"(?<=[.!?;:])\s+", items[i]["text"])
-                if len(parts) < 2:
-                    continue
-                outs = _safe_batch(translator.translate_batch,
-                                   [{"text": p, "kind": items[i]["kind"]}
-                                    for p in parts if p.strip()])
-                # every substantial piece must actually be JAPANESE - the free
-                # endpoint sometimes ECHOES the English back, and accepting an
-                # echo produces a half-translated mixed-language paragraph
-                if outs and all(o for o in outs) and \
-                        all(_looks_japanese(o) or len(o) < 12 for o in outs):
-                    results[i] = " ".join(outs)
+                res = _sentence_translate(translator, units[i], items[i])
+                if res:
+                    results[i] = res
                     print(f"[{name}] unit {units[i]['uid']}: translated in "
-                          f"{len(outs)} sentence pieces", file=sys.stderr)
+                          f"sentence pieces", file=sys.stderr)
             # one retry for units whose placeholders did not survive
             bad = [i for i in miss
                    if results[i] and not _placeholders_ok(items[i]["text"], results[i])]
@@ -202,14 +239,20 @@ def run(name: str, engine: str = "mock"):
                 # the set of surviving tokens grows until the round-trip closes
                 txt = items[i]["text"]
                 vals = []
-                for _ in range(3):
+                for _ in range(4):
+                    if out is None or out == "":
+                        # transient empty - retry the same text once more
+                        out = _safe_batch(translator.translate_batch,
+                                          [{"text": txt,
+                                            "kind": items[i]["kind"]}])[0]
+                        continue
                     need = set(tok_re.findall(txt))
-                    got = set(tok_re.findall(out or ""))
+                    got = set(tok_re.findall(out))
                     missing, extra = need - got, got - need
                     if extra or len(missing) > 6:
                         break
                     if not missing:
-                        if out and _digits_ok(vals, out):
+                        if _digits_ok(vals, out) and not _echoish(out):
                             results[i] = out
                             repaired.add(i)
                             print(f"[{name}] unit {units[i]['uid']}: repaired by "
@@ -222,6 +265,16 @@ def run(name: str, engine: str = "mock"):
                         vals.append(v)
                     out = _safe_batch(translator.translate_batch,
                                       [{"text": txt, "kind": items[i]["kind"]}])[0]
+                if i not in repaired:
+                    # too many drops for whole-unit repair (a 4KB paragraph
+                    # with 30+ tokens): per-sentence translation with
+                    # per-sentence validation
+                    res = _sentence_translate(translator, units[i], items[i])
+                    if res:
+                        results[i] = res
+                        repaired.add(i)
+                        print(f"[{name}] unit {units[i]['uid']}: repaired "
+                              f"sentence-by-sentence", file=sys.stderr)
             still = [i for i in miss
                      if i not in repaired and results[i]
                      and not _placeholders_ok(items[i]["text"], results[i])]
