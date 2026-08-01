@@ -354,16 +354,29 @@ def find_gutter(chars, page_w, x0=0):
     band = width * 0.04
     col_chars = []
     crossing = 0
+    mid_crossing = 0
+    tops = [c["top"] for c in chars]
+    t_lo, t_hi = min(tops), max(tops)
+    t_span = max(t_hi - t_lo, 1.0)
     for seg in _char_segments(chars):
         rl = min(c["x0"] for c in seg); rr = max(c["x1"] for c in seg)
         if rl < mid_guess - band and rr > mid_guess + band:
             crossing += len(seg)
+            st = statistics.median(c["top"] for c in seg)
+            # crossing lines in the MIDDLE of the page: a real two-column
+            # page only crosses at the top (title/abstract) or the bottom
+            # (footer); mid-page full-width paragraphs mean the "columns"
+            # are actually a photo beside text (book/magazine layout)
+            if 0.3 < (st - t_lo) / t_span < 0.9:
+                mid_crossing += len(seg)
             continue
         col_chars.extend(seg)
     # a page whose text is MOSTLY full-width lines is a single-column page
     # with an inset box/sidebar - the side-confined leftovers must not
     # fabricate a gutter (paragraphs would reflow into phantom half lanes)
     if crossing > 0.5 * len(chars):
+        return None
+    if mid_crossing > 0.2 * len(chars):
         return None
     if len(col_chars) < 40:
         col_chars = chars  # fallback
@@ -476,7 +489,20 @@ def detect_columns(lines, page_w):
     leftc = sum(1 for l in lines if l["x1"] < mid + band)
     rightc = sum(1 for l in lines if l["x0"] > mid - band)
     crossing = sum(1 for l in lines if l["x0"] < mid - band and l["x1"] > mid + band)
+    # crossing lines in the page's vertical MIDDLE: a real two-column page
+    # crosses only at the top (title/abstract) or bottom (footer). Mid-page
+    # full-width paragraphs mean photo-beside-text (book layout), where a
+    # phantom gutter shreds the reflow into bogus half lanes.
+    tops = [l["top"] for l in lines]
+    t_lo, t_hi = min(tops), max(tops)
+    t_span = max(t_hi - t_lo, 1.0)
+    crossing_mid = sum(
+        1 for l in lines
+        if l["x0"] < mid - band and l["x1"] > mid + band
+        and 0.3 < (l["top"] - t_lo) / t_span < 0.9)
     total = len(lines)
+    if crossing_mid > max(3, 0.1 * total):
+        return None
     if total >= 8 and leftc >= total * 0.25 and rightc >= total * 0.25 and crossing <= total * 0.25:
         return mid
     return None
