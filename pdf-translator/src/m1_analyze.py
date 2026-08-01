@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Milestone 1: Layout analysis engine
-import os, re, json, statistics
+import os, re, json, statistics, unicodedata
 import pdfplumber
 from PIL import Image, ImageDraw, ImageFont
 
@@ -49,7 +49,6 @@ def _char_segments(chars, gutter=None):
     # Without this the duplicates interleave by x and every word doubles
     # ("AIM AIM" -> "AAIIMM"), which poisons segmentation AND translation.
     seen = set()
-    recent = {}                        # text -> [(x0, top, adv)] of kept chars
     deduped = []
     for c in chars:
         qx = int(c["x0"] * 3)          # 1/3pt buckets; check both neighbours so
@@ -58,22 +57,77 @@ def _char_segments(chars, gutter=None):
                 for dx in (0, 1, -1) for dy in (0, 1, -1)]
         if any(k in seen for k in keys):
             continue
-        # OFFSET doubles: faux-bold / shadow layers re-draw a whole run shifted
-        # by up to ~2.5pt diagonally (sometimes at a hair different scale) -
-        # too far for the buckets above. A real repeated letter ("ll") sits on
-        # the SAME baseline exactly one advance away, and a real next-line char
-        # sits a full line height (>= ~1x size) below - so a same-glyph
-        # neighbour with a small-but-nonzero vertical offset (or well under one
-        # advance horizontally) can only be a double-print.
+        seen.add(keys[0])
+        deduped.append(c)
+    chars = deduped
+    # SCALED-DUPLICATE RUNS: some PDFs draw a whole text panel TWICE at
+    # slightly different scales (an infographic exported once directly and
+    # once inside a rescaled form). Corresponding lines then sit up to a line
+    # pitch apart with DIFFERENT text at the colliding y, so char-level
+    # dedupe can never catch them and the copies interleave into gibberish.
+    # Detect whole baseline runs whose normalized text already appeared
+    # nearby at a slightly DIFFERENT size (a real repeated line - a table's
+    # recurring cell - repeats at the SAME size) and drop the copy. This runs
+    # BEFORE the per-char offset dedupe below: that one keeps only tight
+    # matches and would otherwise eat parts of a copy, leaving fragments no
+    # run key can pair up.
+    runs = []
+    for c in chars:
+        sz = c.get("size") or (c["bottom"] - c["top"]) or 8.0
+        r = runs[-1] if runs else None
+        # the split gap is TIGHT (~half a char size): two side-by-side panels'
+        # headers must not concatenate into one run, or the copies' keys
+        # ("CONGRESS" vs "CONGRESSFEDERAL") never match. Word spaces are well
+        # under 0.5x size; a justified line that still splits is harmless -
+        # both copies split at the same place and match piecewise.
+        if r is not None and abs(c["top"] - r["top"]) <= 0.35 and \
+                -1.0 <= c["x0"] - r["x1"] <= max(1.5, 0.5 * sz):
+            r["chars"].append(c)
+            r["x1"] = max(r["x1"], c["x1"])
+        else:
+            runs.append({"top": c["top"], "x0": c["x0"], "x1": c["x1"],
+                         "chars": [c]})
+    kept_runs = {}
+    drop = set()
+    for r in runs:
+        t = unicodedata.normalize("NFKC",
+                                  "".join(x["text"] for x in r["chars"]))
+        key = re.sub(r"[^0-9a-z]", "", t.lower())
+        if len(key) < 6:
+            continue
+        szs = [x.get("size") or 0 for x in r["chars"] if x.get("size")]
+        rsz = statistics.median(szs) if szs else 8.0
+        dup = False
+        for (px0, ptop, psz) in kept_runs.get(key, ()):
+            ratio = max(rsz, psz) / max(min(rsz, psz), 0.1)
+            if 1.02 <= ratio <= 1.35 and abs(r["x0"] - px0) <= 8.0 and \
+                    abs(r["top"] - ptop) <= 1.8 * max(rsz, psz):
+                dup = True
+                break
+        if dup:
+            drop.update(id(x) for x in r["chars"])
+        else:
+            kept_runs.setdefault(key, []).append((r["x0"], r["top"], rsz))
+    if drop:
+        chars = [c for c in chars if id(c) not in drop]
+    # OFFSET doubles: faux-bold re-draws a whole run shifted by up to ~2pt
+    # diagonally - too far for the exact buckets above, too close for distinct
+    # runs. A real repeated letter ("ll") sits on the SAME baseline exactly
+    # one advance away, so a same-glyph neighbour with a small-but-nonzero
+    # vertical offset (or well under one advance horizontally) can only be a
+    # double-print. The window stays TIGHT (<=1.2pt) on purpose: two unrelated
+    # lines from a scaled duplicate layer can nearly coincide, and a wider
+    # window eats legitimate letters out of them (the run pass above handles
+    # those as whole lines).
+    recent = {}                    # text -> [(x0, top, adv, size)] kept chars
+    deduped = []
+    for c in chars:
         adv = c["x1"] - c["x0"]
         sz = c.get("size") or (c["bottom"] - c["top"]) or 8.0
-        dy_lim = min(3.0, max(1.2, 0.35 * sz))
-        dx_lim = min(3.0, max(2.0, 0.30 * sz))
         prev = recent.get(c["text"], [])
-        prev = [p for p in prev if p[1] >= c["top"] - 3.2]
+        prev = [p for p in prev if p[1] >= c["top"] - 1.3]
         dup = any(
-            (0.05 < abs(c["top"] - p[1]) <= dy_lim
-             and abs(c["x0"] - p[0]) <= dx_lim
+            (0.05 < abs(c["top"] - p[1]) <= 1.2 and abs(c["x0"] - p[0]) <= 2.0
              and max(sz, p[3]) / max(min(sz, p[3]), 0.1) <= 1.15)
             or (abs(c["top"] - p[1]) <= 0.05
                 and abs(c["x0"] - p[0]) <= 0.45 * max(adv, p[2]))
@@ -82,7 +136,6 @@ def _char_segments(chars, gutter=None):
             continue
         prev.append((c["x0"], c["top"], adv, sz))
         recent[c["text"]] = prev
-        seen.add(keys[0])
         deduped.append(c)
     chars = deduped
     open_segs, done = [], []
@@ -105,6 +158,14 @@ def _char_segments(chars, gutter=None):
             cs = c.get("size") or 0
             ss = s.get("sz") or 0
             if cs and ss and max(cs, ss) / min(cs, ss) > 1.6:
+                continue
+            # INTERLEAVE guard: a char STARTING left of the segment's right
+            # edge would be sorted into its middle. Real text in one line only
+            # appends (kerning grazes < ~0.5pt); a mid-line insert at a
+            # different size is another element physically overlapping (a
+            # box header over a ghost body line) - keep them separate.
+            if c["x0"] < s["x1"] - 0.6 and cs and ss and \
+                    max(cs, ss) / min(cs, ss) > 1.1:
                 continue
             gap = max(c["x0"] - s["x1"], s["x0"] - c["x1"], 0.0)
             # word spaces are ~0.5x char width; column/label gaps are far larger.
@@ -157,6 +218,15 @@ def _char_segments(chars, gutter=None):
                         continue
                     if s.get("sz") and o.get("sz") and \
                             max(s["sz"], o["sz"]) / min(s["sz"], o["sz"]) > 1.6:
+                        continue
+                    # INTERLEAVE guard (same as the char-attach one): two real
+                    # same-line segments meet edge to edge; segments whose
+                    # x-ranges OVERLAP at different sizes are different
+                    # elements printed on top of each other - merging would
+                    # shuffle their chars together
+                    x_ov = min(s["x1"], o["x1"]) - max(s["x0"], o["x0"])
+                    if x_ov > 0.6 and s.get("sz") and o.get("sz") and \
+                            max(s["sz"], o["sz"]) / min(s["sz"], o["sz"]) > 1.1:
                         continue
                     gap = max(o["x0"] - s["x1"], s["x0"] - o["x1"], 0.0)
                     if gap > min(max(3.2 * max(s["cw"], o["cw"]),
