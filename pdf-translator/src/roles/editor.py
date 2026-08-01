@@ -326,6 +326,13 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
     bands = []
     for f in _obstacle_figs(page):
         if _overlaps(x0, x1, f["x0"], f["x1"]):
+            # the unit's SOURCE sat on this figure (a bubble-chart circle, a
+            # decorated panel): the artwork is this label's canvas, exactly
+            # where the Japanese belongs - not an obstacle (mirrors m3's
+            # on_figs exemption and QA's source-overlap exemption)
+            if not (f["bottom"] <= u["_top"] - 2
+                    or f["top"] >= u["_top"] + _src_h + 2):
+                continue
             bands.append((f["top"] - 6, f["bottom"] + 6))
     for b in page["blocks"]:
         if (b["type"] in KEPT or b.get("_keep_en")) and \
