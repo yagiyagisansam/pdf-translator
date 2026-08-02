@@ -306,11 +306,23 @@ def cluster_lines(chars, gutter=None):
     mw = statistics.median([c["x1"] - c["x0"] for c in chars]) or 4.0
     segs = [sorted(s, key=lambda c: (c["x0"], c["top"]))
             for s in _char_segments(chars, gutter=gutter)]
-    from collections import Counter
-    starts = Counter(round(s[0]["x0"]) for s in segs)
-    strong = [x for x, n in starts.items() if n >= 3]
-    def at_edge(x):
-        return any(abs(x - e) <= 1.5 for e in strong)
+    starts = {}
+    for s in segs:
+        starts.setdefault(round(s[0]["x0"]), []).append(s[0]["top"])
+    strong = {x: tops for x, tops in starts.items() if len(tops) >= 3}
+
+    def at_edge(x, top):
+        # the shared left edge must be shared NEARBY: a text island fusing
+        # through this line has rows right beside it. Without the vertical
+        # window, figure labels 100pt+ away form a phantom edge and a
+        # justified prose line whose stretched word gap happens to land there
+        # is torn in two (the torn halves become overlapping duplicate blocks
+        # -> residual English under the Japanese).
+        for e, tops in strong.items():
+            if abs(x - e) <= 1.5 and \
+                    sum(1 for t in tops if abs(t - top) <= 72.0) >= 2:
+                return True
+        return False
     out = []
     for seg in segs:
         cw = statistics.median([c["x1"] - c["x0"] for c in seg]) or mw
@@ -326,7 +338,7 @@ def cluster_lines(chars, gutter=None):
             # label cell ("EMEA | 3,240") still splits: its gap is huge.
             short_head = " " not in head and len(head) <= 12
             need = max(4.0, (2.4 if short_head else 1.2) * cw)
-            if not marker_re.match(head) and at_edge(c["x0"]) \
+            if not marker_re.match(head) and at_edge(c["x0"], c["top"]) \
                     and c["x0"] - cur[-1]["x1"] >= need:
                 out.append(cur); cur = [c]
             else:
@@ -456,6 +468,7 @@ def _mkline(seg, mw):
     # unmapped glyphs extract as "(cid:NNN)" - almost always dashes/bullets in
     # fonts without a ToUnicode map. A dash reads correctly ("00-45"); the
     # literal "(cid:239)" would pollute the translation input and output.
+    n_cid = len(re.findall(r"\(cid:\d+\)", text))
     if "(cid:" in text:
         text = re.sub(r"\(cid:\d+\)", "-", text)
     # Private-Use-Area chars (Wingdings checkboxes/bullets) survive translation
@@ -465,6 +478,17 @@ def _mkline(seg, mw):
     sizes = [c.get("size", 0) for c in seg if c.get("size")]
     fonts = [c.get("fontname", "") for c in seg]
     bold = sum(1 for f in fonts if "bold" in f.lower()) / max(1, len(fonts))
+    # MATH SIGNAL: equations must never enter the translation flow (a machine
+    # engine turns them into gibberish and the leftover glyphs overlap it).
+    # Two independent signals, take the stronger: (a) chars drawn in dedicated
+    # math fonts (TeX CMMI/CMSY/CMEX, AMS, Cambria Math, Symbol, ...) - this
+    # also catches a lone italic "t" beside a formula; (b) math-alphabet
+    # unicode density (Greek, operators, arrows, sub/superscripts) plus
+    # unmapped-glyph count (symbol fonts without ToUnicode).
+    mf = sum(1 for f in fonts if MATH_FONT_RE.search(f)) / max(1, len(fonts))
+    body_txt = text.replace(" ", "")
+    msym = sum(1 for ch in body_txt if _is_math_char(ch))
+    md = (msym + n_cid) / max(1, len(body_txt) + n_cid)
     from collections import Counter
     color = Counter(tuple(round(v, 2) for v in _char_rgb(c))
                     for c in seg).most_common(1)[0][0]
@@ -475,6 +499,7 @@ def _mkline(seg, mw):
         "size": round(statistics.median(sizes), 1) if sizes else 0,
         "bold": bold > 0.5,
         "color": list(color),
+        "math": round(max(mf, md), 3),
     }
 
 def detect_columns(lines, page_w):
@@ -557,12 +582,54 @@ def _is_contact_line(text):
             if len([w for w in rest.split() if re.search(r"[A-Za-z]", w)]) <= 3:
                 return True
     return False
-# ref list entries: "1. Sheppard JM..." (numbered) or "[22] Federal..."
-# (AIAA bracket style) - both gated behind an explicit References heading
-REF_RE = re.compile(r"^(?:\d+\.\s+|\[\d+\]\s*)[A-Z][A-Za-z]+")
+# ref list entries: "1. Sheppard JM..." (numbered), "[22] Federal..."
+# (AIAA bracket style) or "[1] S. Solomon..." (initials-first style) - all
+# gated behind an explicit References heading
+REF_RE = re.compile(r"^(?:\d+\.\s+|\[\d+\]\s*)[A-Z](?:[A-Za-z]+|\.)")
+# strict bibliographic entry: number + "Surname, I." or "I. Surname" - strong
+# enough to recognise a reference list that has NO "References" heading
+BIB_RE = re.compile(
+    r"^\[?\d{1,3}[.\]]\s+(?:[A-Z][A-Za-z'’-]+,\s*[A-Z]\.|"
+    r"[A-Z]\.\s*[A-Z][A-Za-z'’-]+,)")
+
+# dedicated math typefaces: TeX (CMMI math italic, CMSY symbols, CMEX big
+# operators, AMS MSAM/MSBM, Euler), OpenType (Cambria Math, STIX Math),
+# legacy Symbol. CMR/CMBX/CMTI/CMTT are TEXT faces and must stay out.
+MATH_FONT_RE = re.compile(
+    r"CMMI|CMSY|CMEX|CMBSY|MSAM|MSBM|EUFM|EURM|EUSM|ESINT|STMARY|WASY|"
+    r"RSFS|BBOLD|LASY|Math|Symbol", re.I)
+
+def _is_math_char(ch):
+    """Greek letters, math operators, arrows, sub/superscripts - the alphabet
+    of displayed equations, rare in prose."""
+    o = ord(ch)
+    return (0x0370 <= o <= 0x03FF or 0x2190 <= o <= 0x21FF or
+            0x2200 <= o <= 0x22FF or 0x2070 <= o <= 0x209F or
+            0x27C0 <= o <= 0x27EF or 0x2A00 <= o <= 0x2AFF or
+            o in (0x00B1, 0x00D7, 0x00F7, 0x221E, 0x0192))
+
+# a word made ENTIRELY of doubled letter pairs ("iiff", "TTssttoorrmm",
+# "aanndd") is zipped extraction of two stacked equation rows - corruption
+# evidence, never a real word
+_DOUBLED_RE = re.compile(r"^(?:([A-Za-z])\1)+$")
+
+def _mathish_text(t, score):
+    """True when a line/block is equation material: a strong math signal AND
+    almost no real words (a prose sentence merely citing α stays body)."""
+    if score < 0.28:
+        return False
+    words = [w for w in re.findall(r"[A-Za-z]{4,}", t)
+             if w.lower() not in ("sinh", "cosh", "tanh", "sqrt")
+             and not _DOUBLED_RE.match(w)]
+    return len(words) <= 2
 
 def classify_block(b, body_size, page_idx, page_h, is_ref_zone):
     t = b["text"]
+    # displayed equations (and their satellite fragments: a lone italic t, a
+    # Σ limit "=1") are kept verbatim in place - translating them produces
+    # gibberish and the un-strippable math glyphs overlap it
+    if _mathish_text(t, b.get("math", 0.0)):
+        return "data"
     if CAP_RE.match(t):
         return "caption"
     # numeric/table-like rows (e.g. "Week 1 2 3 4 5", "6 5", "Total volume 25 30 35").
@@ -739,12 +806,27 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                 return "list"
         return None
 
+    _MARK_RE = re.compile(r"^(?:[•‣⁃▪●·∙–—-]|\d{1,2}[.)])\s+")
+
+    def _hang_cont(l, b):
+        """l looks like the WRAPPED CONTINUATION of a list item: block b opens
+        with a marker line, l carries no marker of its own, and l's left edge
+        sits roughly one marker-width right of the item's edge (the classic
+        hanging indent). Size similarity and vertical adjacency are already
+        enforced by the caller's other guards."""
+        first = b["lines"][0]
+        if not _MARK_RE.match(first["text"]) or _MARK_RE.match(l["text"]):
+            return False
+        sz = l["size"] or b["size_med"] or 10.0
+        dx = l["x0"] - first["x0"]
+        return 0.35 * sz <= dx <= 3.0 * sz
+
     # a DOT-LEADER line (TOC row "Title . . . . 1-1-12") is one row of a
     # leadered list even when the leader glues the title and the page number
     # into a single segment - sealing it keeps rows from chaining into one
     # run-on paragraph of dots
     _leader = re.compile(r"(?:[.·⋅]\s*){5,}")
-    record_rows, list_rows = set(), set()
+    record_rows, list_rows, math_rows = set(), set(), []
     for l in ls:
         why = _is_record_row(l)
         if why or _is_contact_line(l["text"]) or _leader.search(l["text"]):
@@ -759,6 +841,31 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
         if l.get("size") and l["size"] <= 6.5 and len(t) <= 8 and \
                 t.isupper() and t.isalpha():
             record_rows.add(id(l))
+        # EQUATION lines seal too: a display formula sitting between two prose
+        # lines must never be absorbed into the paragraph block - the engine
+        # would turn it into gibberish and its leftover glyphs overlap the
+        # Japanese (the "iiff ((tt ..." failure). Sealed one-line blocks are
+        # then typed `data` by classify_block and kept verbatim in place.
+        if _mathish_text(t, l.get("math", 0.0)):
+            record_rows.add(id(l))
+            math_rows.append(l)
+    # equation SATELLITES: the second row of a TeX cases block ("0 otherwise"),
+    # a summation limit, an operand row - short near-wordless lines HUGGING a
+    # sealed equation line vertically. They carry too weak a signal alone but
+    # belong to the formula; left loose they merge into the paragraph and the
+    # engine mangles them.
+    for l in ls:
+        if id(l) in record_rows or not l.get("math"):
+            continue
+        if len(re.findall(r"[A-Za-z]{4,}", l["text"])) > 3:
+            continue
+        lh = (l["bottom"] - l["top"]) or 1.0
+        for m in math_rows:
+            gap = max(l["top"], m["top"]) - min(l["bottom"], m["bottom"])
+            if gap <= 0.7 * lh:
+                record_rows.add(id(l))
+                l["math"] = 1.0     # classify the one-line block as data
+                break
     open_blocks, done = [], []
     for l in ls:
         lh = (l["bottom"] - l["top"]) or 1.0
@@ -812,10 +919,18 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                     # indented line = new paragraph - EXCEPT centered display
                     # text (a two-line cover title, a centered address line):
                     # centered lines legitimately shift their left edge, so
-                    # accept the join when the line CENTERS align instead
+                    # accept the join when the line CENTERS align instead -
+                    # and EXCEPT the hanging-indent continuation of a list
+                    # item ("• Gearbox Reliability" / "Collaborative (GRC)"):
+                    # slides wrap bullets with the second line aligned to the
+                    # text start after the marker, about one marker-width
+                    # right of the bullet. Without the exception every
+                    # wrapped bullet tears into two blocks and the tail
+                    # floats as its own mistranslated unit.
                     lc = (l["x0"] + l["x1"]) / 2
                     bc = (b["x0"] + b["x1"]) / 2
-                    if abs(lc - bc) > max(8.0, (l["size"] or 8.0) * 0.6):
+                    if abs(lc - bc) > max(8.0, (l["size"] or 8.0) * 0.6) \
+                            and not _hang_cont(l, b):
                         continue
                 score = (ov / wmin, -gap)
                 if best is None or score > best_score:
@@ -903,7 +1018,8 @@ def _numericish(text):
     if not toks or not _DIGIT_ANY_RE.search(text):
         return False
     hits = sum(1 for t in toks
-               if re.fullmatch(r"[\d.,%×x±+\-/()<>≈=]+", t) or _UNIT_TOKEN_RE.match(t))
+               if re.fullmatch(r"[$€£¥]?[\d.,%×x±+\-/()<>≈=]+", t)
+               or _UNIT_TOKEN_RE.match(t))
     return hits / len(toks) > 0.5
 
 
@@ -948,6 +1064,9 @@ def _mkblock(lines, col):
         "bold": sum(l["bold"] for l in lines) > len(lines)/2,
         "nlines": len(lines),
         "num_lines": sum(1 for l in lines if _numericish(l["text"])),
+        "math": round(sum(l.get("math", 0.0) * max(1, len(l["text"]))
+                          for l in lines) /
+                      max(1, sum(max(1, len(l["text"])) for l in lines)), 3),
     }
 
 def horizontal_rules(page, min_width=30.0, max_thick=3.0):
@@ -1074,8 +1193,20 @@ def analyze_pdf(path, name, render=True):
                 ref_heading_seen = True
                 ref_head_top = l["top"] if ref_head_top is None else \
                     min(ref_head_top, l["top"])
-        is_ref = ref_heading_seen and \
-            sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3
+        # HEADINGLESS bibliography: some reports bury the reference list in an
+        # appendix with no "References" heading at all. A run of entries in
+        # strict bibliographic form ("1. Jegley, D., Rouse, M., ..." - number
+        # + Surname + comma + initial-dot) is unmistakable: >=4 of them in the
+        # back half of the document open a reference zone starting at the
+        # first such entry. The strict comma-initial shape keeps numbered
+        # method steps ("1. Participants were...") out.
+        bibn = [b for b in blocks if BIB_RE.match(b["text"].strip())]
+        headingless_bib = pi >= npages * 0.5 and len(bibn) >= 4
+        if headingless_bib and ref_head_top is None:
+            ref_head_top = min(b["top"] for b in bibn)
+        is_ref = (ref_heading_seen and
+                  sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3) or \
+            headingless_bib
         for b in blocks:
             zone = is_ref and (ref_head_top is None or b["top"] >= ref_head_top - 2)
             b["type"] = classify_block(b, body_size, pi, ph, zone)
@@ -1120,7 +1251,19 @@ def analyze_pdf(path, name, render=True):
         # in the BACK HALF of the document: bibliographies live at the end, whereas
         # a numbered METHODS/protocol list ("1. Participants were...") is early and
         # would otherwise poison every following page as "reference" (untranslated).
-        if ref_heading_seen and (is_ref or ref_started) and pi >= npages * 0.5:
+        if (is_ref or ref_started) and pi >= npages * 0.5:
+            NUM_RE = re.compile(r"^\[?\d+[.\]]")
+            # the bibliography ENDS when a page shows no evidence of it: not
+            # one strict bibliographic entry ("N. Surname, I." / "[N] I.
+            # Surname") on the whole page. Reports often place appendices
+            # AFTER the references - sticky propagation must not swallow them
+            # ("Appendix A" prose or an acronym glossary typed reference =
+            # whole chapters left untranslated). A numbered appendix heading
+            # ("6. Appendix B: ...") is NOT evidence, hence BIB_RE, not NUM_RE.
+            if not is_ref and not any(BIB_RE.match(b["text"].strip())
+                                      for b in blocks):
+                ref_started = False
+        if (is_ref or ref_started) and pi >= npages * 0.5:
             NUM_RE = re.compile(r"^\[?\d+[.\]]")
             for col in sorted({b.get("col", 0) for b in blocks}):
                 cb = sorted((b for b in blocks if b.get("col", 0) == col),
@@ -1206,6 +1349,53 @@ def analyze_pdf(path, name, render=True):
                 figs.append({"type": "figure", "col": 0, "vector": True,
                              "x0": bx[0], "x1": bx[2], "top": bx[1],
                              "bottom": bx[3], "text": "", "order": None})
+        # CHART PLOT BOX: a sparse scatter/line chart never clusters - its
+        # markers sit tens of points apart - but virtually every chart draws
+        # a plot FRAME rect. A large rect containing many small FILLED marks
+        # (data points, bar slivers) is a chart: register it as a vector
+        # figure or the reflow pours body text into the gaps between its
+        # gridlines. Stroked-only small rects (form checkboxes) don't count
+        # as marks, so forms stay untouched.
+        _prims = list(page.rects or []) + list(page.curves or [])
+        small_marks = [s for s in _prims
+                       if (s["x1"] - s["x0"]) <= 8.0
+                       and (s["bottom"] - s["top"]) <= 8.0
+                       and s.get("fill")]
+        if len(small_marks) >= 8:
+            big_rects = sorted(
+                (r for r in (page.rects or [])
+                 if (r["x1"] - r["x0"]) >= 100 and (r["bottom"] - r["top"]) >= 60
+                 and (r["x1"] - r["x0"]) * (r["bottom"] - r["top"]) <= 0.8 * pw * ph),
+                key=lambda r: -((r["x1"] - r["x0"]) * (r["bottom"] - r["top"])))
+            for r in big_rects:
+                inside = sum(1 for s in small_marks
+                             if s["x0"] >= r["x0"] - 2 and s["x1"] <= r["x1"] + 2
+                             and s["top"] >= r["top"] - 2
+                             and s["bottom"] <= r["bottom"] + 2)
+                if inside < 8:
+                    continue
+                if any(f["x0"] <= r["x0"] + 2 and f["x1"] >= r["x1"] - 2 and
+                       f["top"] <= r["top"] + 2 and f["bottom"] >= r["bottom"] - 2
+                       for f in figs):
+                    continue    # already covered by a registered figure
+                # decorated-panel guard: a big rect enclosing flowing prose is
+                # a callout box, not a chart
+                decorated = False
+                for b in blocks:
+                    ba = max(0.0, (b["x1"] - b["x0"])) * \
+                        max(0.0, (b["bottom"] - b["top"]))
+                    ix = max(0.0, min(b["x1"], r["x1"]) - max(b["x0"], r["x0"]))
+                    iy = max(0.0, min(b["bottom"], r["bottom"]) - max(b["top"], r["top"]))
+                    if ba and ix * iy >= 0.7 * ba and \
+                            b.get("nlines", 1) >= 3 and \
+                            (b.get("size") or 0) >= body_size * 0.9:
+                        decorated = True
+                        break
+                if decorated:
+                    continue
+                figs.append({"type": "figure", "col": 0, "vector": True,
+                             "x0": r["x0"], "x1": r["x1"], "top": r["top"],
+                             "bottom": r["bottom"], "text": "", "order": None})
             # small text sitting inside a vector diagram is figure content.
             # SHORT WORD LABELS (a bubble-chart circle's caption, a legend
             # entry) become `label`: translated and drawn strictly IN PLACE

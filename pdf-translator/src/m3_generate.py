@@ -120,6 +120,33 @@ def _matches_blob(op_norm, blob, blob_drop=None, op_norm_drop=None,
         return True
     return False
 
+def _split_span_kept(t, kill_blob, keep_blob, keep_tokens):
+    """An op that spans a TRANSLATED cell and a KEPT cell in one show op
+    ("Single User License $2,995" drawn as one Tj) can never fully match the
+    kill blob. Detect the split: a long prefix (or suffix) matching the kill
+    blob while the remainder belongs to a kept block. Returns the kept part's
+    RAW text (for displaced redraw at its block position), or None."""
+    idx = [k for k, ch in enumerate(t) if ch.isascii() and ch.isalnum()]
+    full = "".join(t[k].lower() for k in idx)
+    if len(full) < 8:
+        return None
+
+    def _kept(part):
+        return part and (part in keep_tokens or
+                         any(part in kb for kb in keep_blob))
+    # translated prefix + kept suffix (longest translated part first).
+    # The raw cut starts right AFTER the last translated alnum char, so
+    # punctuation belonging to the kept part ("$" of "$2,995") survives.
+    for cut in range(len(full) - 1, 5, -1):
+        if full[:cut] in kill_blob and _kept(full[cut:]):
+            return t[idx[cut - 1] + 1:].strip()
+    # kept prefix + translated suffix
+    for cut in range(1, len(full) - 5):
+        if full[cut:] in kill_blob and _kept(full[:cut]):
+            return t[:idx[cut]].strip()
+    return None
+
+
 def _op_text(op):
     o = str(op.operator); a = op.operands
     if o == "TJ":
@@ -287,10 +314,12 @@ def _decode_op(op, cur_font, decoders):
     return "".join(out)
 
 
-def redraw_displaced(displaced_pages, layout):
+def redraw_displaced(displaced_pages, layout, translated_sids=frozenset()):
     """Draw specs for ops the advance-chain guard removed: each text is
-    matched to a KEPT (non-translatable) block on its page and redrawn at
-    that block's own position - identical digits/letters, correct spot."""
+    matched to a KEPT block on its page and redrawn at that block's own
+    position - identical digits/letters, correct spot. A translatable-typed
+    block that is NOT covered by any unit (an engine echo left in place) is
+    kept too, so it is eligible."""
     trans = {"body", "heading", "caption", "title", "label"}
     out = {}
     for pi, texts in displaced_pages.items():
@@ -301,14 +330,22 @@ def redraw_displaced(displaced_pages, layout):
             if not n:
                 continue
             for bi, b in enumerate(blocks):
-                if bi in used or b["type"] in trans:
+                if bi in used or (b["type"] in trans
+                                  and f"{pi}:{bi}" in translated_sids):
                     continue
                 if _norm_txt(b["text"]) == n:
                     used.add(bi)
+                    # the redraw font is the Japanese subset: high-Latin
+                    # artifacts of raw WinAnsi bytes (Œ for a bullet) have no
+                    # glyph there and would print tofu - keep ASCII + CJK only
+                    t2 = "".join(ch for ch in t
+                                 if ord(ch) < 128
+                                 or 0x3000 <= ord(ch) <= 0x9FFF
+                                 or 0xFF00 <= ord(ch) <= 0xFFEF)
                     out.setdefault(pi, []).append({
                         "x": b["x0"], "y_top": b["top"],
                         "size": max(4.0, b.get("size") or 9.0),
-                        "text": t.strip(),
+                        "text": t2.strip(),
                         "color": list(b.get("color") or (0, 0, 0))})
                     break
     return out
@@ -327,6 +364,40 @@ def keep_tokens_for(p, pi, unit_for_block):
             if n:
                 toks.add(n)
     return toks
+
+
+def keep_blob_for(p, pi, unit_for_block):
+    """Joined normalized text of each kept DATA block (display equations,
+    table/spec cells) on page pi. Their ops are split FINER than whitespace
+    tokens ("π"+"(context"+")"), so the sweep needs a substring-level notion
+    of 'this belongs to a kept block'. Restricted to `data` on purpose:
+    running heads / page furniture share ordinary words with the prose
+    ("Technology"), and including them made torn prose tails ambiguous and
+    un-droppable."""
+    blobs = []
+    for b in p["blocks"]:
+        if b["type"] != "data":
+            continue
+        n = _norm_txt(b.get("text", ""))
+        if len(n) >= 2:
+            blobs.append(n)
+    return tuple(blobs)
+
+
+def keep_blob_all_for(p, pi, unit_for_block):
+    """Normalized text of EVERY block that stays on the page - kept types AND
+    translatable blocks not covered by any unit (engine echoes). Used only by
+    the split-span detector, where the other half of the op must match the
+    kill blob, so ordinary shared words cannot cause false protection."""
+    trans = {"body", "heading", "caption", "title", "label"}
+    blobs = []
+    for bi, b in enumerate(p["blocks"]):
+        if b["type"] in trans and f"{pi}:{bi}" in unit_for_block:
+            continue
+        n = _norm_txt(b.get("text", ""))
+        if len(n) >= 2:
+            blobs.append(n)
+    return tuple(blobs)
 
 
 def _form_xobjects(res, seen):
@@ -371,12 +442,23 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                   parent_decoders=None):
     blob_drop = kwargs.get("kill_blob_drop")
     blob_nodigit = _DIGIT_RE.sub("", kill_blob)
+    keep_tokens = kwargs.get("keep_tokens") or frozenset()
+    keep_blob = kwargs.get("keep_blob") or ()
+    keep_blob_all = kwargs.get("keep_blob_all") or keep_blob
+
+    def _in_keep_blob(n):
+        return any(n in kb for kb in keep_blob)
     # an XObject may inherit fonts from its parent's Resources
     decoders = dict(parent_decoders or {})
     decoders.update(_page_font_decoders(res_owner))
     ops = list(parse_content_stream(stream_obj))
     is_text=[False]*len(ops); dropped=[False]*len(ops)
     op_uni=[None]*len(ops)   # decoded Unicode text per text op (for the frag pass)
+    # ops whose text lives in a KEPT block AND in the kill blob (a display
+    # equation whose phrase is repeated as inline math in the translated
+    # prose): content alone cannot tell the copies apart, so the drop is
+    # DEFERRED and resolved by stream context below
+    ambiguous=[False]*len(ops)
     cur_font=None
     for i,op in enumerate(ops):
         o=str(op.operator)
@@ -393,6 +475,10 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                              blob_drop, _norm_txt_drop(t),
                              blob_nodigit=blob_nodigit):
                 dropped[i]=True
+                _n=_norm_txt(t)
+                if _n and (len(_n) >= 2 or ord(_n[0]) > 127) \
+                        and _in_keep_blob(_n):
+                    ambiguous[i]=True
             # a PURE LIGATURE op ('ﬂ' of "...triﬂuoro..." drawn as its own
             # op) normalizes to 2 chars - under the >=3 guard - and survives
             # as a stray fragment over the Japanese. The raw glyph may be the
@@ -403,8 +489,44 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                                      "fi", "fl", "ff", "ffi", "ffl") and \
                     _norm_txt(t) and _norm_txt(t) in kill_blob:
                 dropped[i]=True
+            else:
+                # one op spanning a translated cell AND a kept cell ("Single
+                # User License $2,995" as a single Tj) never fully matches
+                # the blob: drop the whole op and redraw the kept part at its
+                # block's true position via the displaced channel
+                kept_part = _split_span_kept(t, kill_blob, keep_blob_all,
+                                             keep_tokens)
+                if kept_part is not None:
+                    dropped[i]=True
+                    _disp = kwargs.get("displaced")
+                    if _disp is not None and kept_part.strip():
+                        _disp.append(kept_part)
     text_idx=[i for i in range(len(ops)) if is_text[i]]
     pos={idx:k for k,idx in enumerate(text_idx)}
+    # resolve deferred (ambiguous) drops by stream context: the PROSE copy of
+    # the phrase sits near other definitively-dropped prose ops; the KEPT
+    # (equation/cell) copy is surrounded by ops that stay. The scan skips up
+    # to 3 INSUBSTANTIAL ops (bullet markers, math glyphs that normalize
+    # empty) - a "• Social security..." bullet's true neighbour is the
+    # dropped paragraph before the marker, while an equation fragment is
+    # walled off from the dropped prose by its own run of symbol ops.
+    def _near_dropped(k, step):
+        hops = 0
+        m2 = k + step
+        while 0 <= m2 < len(text_idx) and hops < 3:
+            idxn = text_idx[m2]
+            tn_ = (op_uni[idxn] if op_uni[idxn] is not None
+                   else _op_text(ops[idxn]))
+            if len(_norm_txt(tn_)) >= 3:
+                return dropped[idxn] and not ambiguous[idxn]
+            hops += 1
+            m2 += step
+        return False
+    for k, idx in enumerate(text_idx):
+        if not ambiguous[idx] or not dropped[idx]:
+            continue
+        if not (_near_dropped(k, -1) or _near_dropped(k, +1)):
+            dropped[idx] = False
 
     def _is_frag(idx):
         """A short stray fragment: <=3 normalized chars, or matches _FRAG_RE
@@ -415,7 +537,6 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         norm=_norm_txt(raw)
         return len(norm)<=3 or bool(_FRAG_RE.match(raw_sep))
 
-    keep_tokens = kwargs.get("keep_tokens") or frozenset()
     # CHAR-RUN SWEEP: a line drawn as PER-CHARACTER ops (tracked/justified
     # microtypography) is invisible to the per-op matcher (every op is one
     # letter) and longer than the bounded fragment sweep allows - it survived
@@ -461,6 +582,17 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                     last_ok = re_
                 re_ += 1
             if last_ok is not None:
+                # a matched window that is ITSELF a phrase of a KEPT block is
+                # a display equation / kept cell whose text coincidentally
+                # also appears inside a translated paragraph (inline math
+                # repeating the display formula: "π(context)"). The prose
+                # copy never matches this way - its window keeps extending
+                # through the surrounding sentence - so a window fully inside
+                # the keep blob is the kept copy: leave it on the page.
+                seg = _norm_txt("".join(texts[m2] for m2 in range(rp, last_ok + 1)))
+                if seg and _in_keep_blob(seg):
+                    rp = last_ok + 1
+                    continue
                 for m2 in range(rp, last_ok + 1):
                     idx = run[m2]
                     raw = texts[m2].strip()
@@ -502,6 +634,18 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                                               blob_nodigit=blob_nodigit):
                 dropped[i]=True
                 continue
+        # sub-token pieces of a kept equation ("log", "(context", a lone Σ):
+        # ops are split finer than whitespace tokens, so exact-token
+        # protection misses them. Protect >=2-char pieces found inside a
+        # kept block's joined text, and single NON-ASCII glyphs (math
+        # symbols) likewise. This runs AFTER the seam-join checks above: a
+        # torn prose tail ("T|echnology") whose joined text matches the kill
+        # blob is dropped there, even when the same letters occur in a kept
+        # running head - only pieces the kill blob does not claim reach this
+        # protection.
+        _ni = _norm_txt(raw_i)
+        if _ni and (len(_ni) >= 2 or ord(_ni[0]) > 127) and _in_keep_blob(_ni):
+            continue
         # Scan left/right SKIPPING over consecutive fragment ops to the nearest
         # NON-fragment text op. Drop this fragment only if the body text bounding
         # its run was itself dropped on BOTH sides - i.e. it is wedged inside a
@@ -799,12 +943,27 @@ def _remaining_after(text, taken_lines):
     n = sum(len(l) for l in taken_lines)
     return text[n:]
 
+def unit_is_echo(u):
+    """The engine returned the source unchanged (a name-and-number row, an
+    acronym): drawing that 'translation' over the original double-prints the
+    same Latin text. Such units are left entirely alone - original ops stay,
+    nothing is drawn."""
+    tgt = (u.get("target") or "").strip()
+    if not tgt:
+        return False
+    if any("぀" <= ch <= "ヿ" or "一" <= ch <= "鿿"
+           for ch in tgt):
+        return False
+    return _norm_txt(tgt) == _norm_txt(u.get("source") or "")
+
+
 # ---- main pipeline -------------------------------------------------------------
 def generate(name, src_path):
     ensure_out()
     _register_fonts(name)
     units=json.load(open(f"{OUT}/{name}_bilingual.json"))
     sanitize_targets(units)
+    units=[u for u in units if not unit_is_echo(u)]
     layout=json.load(open(f"{OUT}/{name}_layout.json"))
     unit_for_block={}
     for u in units:
@@ -1057,16 +1216,14 @@ def generate(name, src_path):
                                    kill_blob_drop=kill_blob_drop[pi],
                                    keep_tokens=keep_tokens_for(
                                        layout["pages"][pi], pi, unit_for_block),
+                                   keep_blob=keep_blob_for(
+                                       layout["pages"][pi], pi, unit_for_block),
+                                   keep_blob_all=keep_blob_all_for(
+                                       layout["pages"][pi], pi, unit_for_block),
                                    displaced=dl)
             if dl:
                 displaced_pages[pi]=dl
     stripped=f"{OUT}/{name}_stripped.pdf"; pdf.save(stripped); pdf.close()
-    for pi, ds in redraw_displaced(displaced_pages, layout).items():
-        for d in ds:
-            per_page_draws[pi].append({"x": d["x"], "y_top": d["y_top"],
-                                       "size": d["size"], "font": "NotoJP",
-                                       "line": d["text"], "uid": None,
-                                       "color": d["color"]})
 
     # 2) overlay - flow each unit across its regions
     overlay=f"{OUT}/{name}_overlay.pdf"
@@ -1084,6 +1241,13 @@ def generate(name, src_path):
             mb = page.mediabox
             page_sizes.append((float(mb.width), float(mb.height)))
     per_page_draws={pi:[] for pi in range(npages)}
+    for pi, ds in redraw_displaced(displaced_pages, layout,
+                                   translated_sids=set(unit_for_block)).items():
+        for d in ds:
+            per_page_draws[pi].append({"x": d["x"], "y_top": d["y_top"],
+                                       "size": d["size"], "font": "NotoJP",
+                                       "line": d["text"], "uid": None,
+                                       "color": d["color"]})
     import statistics as _st
     for uid,(u,regs) in unit_regions.items():
         sizes=[]; nlines=0; colors=[]

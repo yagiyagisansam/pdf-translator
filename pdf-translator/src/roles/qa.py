@@ -217,7 +217,8 @@ def review(name, editor_report):
                                   f"{ov[:8]}", "param": "restrip"})
 
     drawn_chars = sum(len(ln["text"]) for lines in placed.values() for ln in lines)
-    translated = [u for u in units if u.get("target")]
+    from m3_generate import unit_is_echo as _echo
+    translated = [u for u in units if u.get("target") and not _echo(u)]
     if translated and drawn_chars < 50:
         defects.append({"role": "editor", "kind": "empty_output",
                         "detail": "almost no Japanese reached the page",
@@ -295,6 +296,9 @@ def review(name, editor_report):
             tgt = u.get("target")
             if not tgt:
                 continue
+            from m3_generate import unit_is_echo
+            if unit_is_echo(u):
+                continue     # left in place by design - not data loss
             got = drawn_ch.get(u["uid"], 0)
             if got == 0:
                 lost.append(u["uid"])
