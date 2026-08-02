@@ -909,6 +909,8 @@ def build(name, src_path, floor=6.0):
                                                unit_for_block),
                 keep_blob=m3.keep_blob_for(layout["pages"][pi], pi,
                                            unit_for_block),
+                keep_blob_all=m3.keep_blob_all_for(layout["pages"][pi], pi,
+                                                   unit_for_block),
                 displaced=dl)
             if dl:
                 displaced_pages[pi] = dl
@@ -917,7 +919,9 @@ def build(name, src_path, floor=6.0):
 
     # 2) reflow (skip the mostly-untranslated pages so they stay original English)
     per_page, overflow = _reflow(layout, units, floor, skip_pages)
-    for pi, ds in m3.redraw_displaced(displaced_pages, layout).items():
+    for pi, ds in m3.redraw_displaced(
+            displaced_pages, layout,
+            translated_sids=set(unit_for_block)).items():
         for d in ds:
             per_page.setdefault(pi, []).append({
                 "x": d["x"], "y_top": d["y_top"], "size": d["size"],

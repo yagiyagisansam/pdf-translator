@@ -314,10 +314,12 @@ def _decode_op(op, cur_font, decoders):
     return "".join(out)
 
 
-def redraw_displaced(displaced_pages, layout):
+def redraw_displaced(displaced_pages, layout, translated_sids=frozenset()):
     """Draw specs for ops the advance-chain guard removed: each text is
-    matched to a KEPT (non-translatable) block on its page and redrawn at
-    that block's own position - identical digits/letters, correct spot."""
+    matched to a KEPT block on its page and redrawn at that block's own
+    position - identical digits/letters, correct spot. A translatable-typed
+    block that is NOT covered by any unit (an engine echo left in place) is
+    kept too, so it is eligible."""
     trans = {"body", "heading", "caption", "title", "label"}
     out = {}
     for pi, texts in displaced_pages.items():
@@ -328,14 +330,22 @@ def redraw_displaced(displaced_pages, layout):
             if not n:
                 continue
             for bi, b in enumerate(blocks):
-                if bi in used or b["type"] in trans:
+                if bi in used or (b["type"] in trans
+                                  and f"{pi}:{bi}" in translated_sids):
                     continue
                 if _norm_txt(b["text"]) == n:
                     used.add(bi)
+                    # the redraw font is the Japanese subset: high-Latin
+                    # artifacts of raw WinAnsi bytes (Œ for a bullet) have no
+                    # glyph there and would print tofu - keep ASCII + CJK only
+                    t2 = "".join(ch for ch in t
+                                 if ord(ch) < 128
+                                 or 0x3000 <= ord(ch) <= 0x9FFF
+                                 or 0xFF00 <= ord(ch) <= 0xFFEF)
                     out.setdefault(pi, []).append({
                         "x": b["x0"], "y_top": b["top"],
                         "size": max(4.0, b.get("size") or 9.0),
-                        "text": t.strip(),
+                        "text": t2.strip(),
                         "color": list(b.get("color") or (0, 0, 0))})
                     break
     return out
@@ -367,6 +377,22 @@ def keep_blob_for(p, pi, unit_for_block):
     blobs = []
     for b in p["blocks"]:
         if b["type"] != "data":
+            continue
+        n = _norm_txt(b.get("text", ""))
+        if len(n) >= 2:
+            blobs.append(n)
+    return tuple(blobs)
+
+
+def keep_blob_all_for(p, pi, unit_for_block):
+    """Normalized text of EVERY block that stays on the page - kept types AND
+    translatable blocks not covered by any unit (engine echoes). Used only by
+    the split-span detector, where the other half of the op must match the
+    kill blob, so ordinary shared words cannot cause false protection."""
+    trans = {"body", "heading", "caption", "title", "label"}
+    blobs = []
+    for bi, b in enumerate(p["blocks"]):
+        if b["type"] in trans and f"{pi}:{bi}" in unit_for_block:
             continue
         n = _norm_txt(b.get("text", ""))
         if len(n) >= 2:
@@ -418,6 +444,7 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
     blob_nodigit = _DIGIT_RE.sub("", kill_blob)
     keep_tokens = kwargs.get("keep_tokens") or frozenset()
     keep_blob = kwargs.get("keep_blob") or ()
+    keep_blob_all = kwargs.get("keep_blob_all") or keep_blob
 
     def _in_keep_blob(n):
         return any(n in kb for kb in keep_blob)
@@ -467,7 +494,7 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                 # User License $2,995" as a single Tj) never fully matches
                 # the blob: drop the whole op and redraw the kept part at its
                 # block's true position via the displaced channel
-                kept_part = _split_span_kept(t, kill_blob, keep_blob,
+                kept_part = _split_span_kept(t, kill_blob, keep_blob_all,
                                              keep_tokens)
                 if kept_part is not None:
                     dropped[i]=True
@@ -1179,6 +1206,8 @@ def generate(name, src_path):
                                        layout["pages"][pi], pi, unit_for_block),
                                    keep_blob=keep_blob_for(
                                        layout["pages"][pi], pi, unit_for_block),
+                                   keep_blob_all=keep_blob_all_for(
+                                       layout["pages"][pi], pi, unit_for_block),
                                    displaced=dl)
             if dl:
                 displaced_pages[pi]=dl
@@ -1200,7 +1229,8 @@ def generate(name, src_path):
             mb = page.mediabox
             page_sizes.append((float(mb.width), float(mb.height)))
     per_page_draws={pi:[] for pi in range(npages)}
-    for pi, ds in redraw_displaced(displaced_pages, layout).items():
+    for pi, ds in redraw_displaced(displaced_pages, layout,
+                                   translated_sids=set(unit_for_block)).items():
         for d in ds:
             per_page_draws[pi].append({"x": d["x"], "y_top": d["y_top"],
                                        "size": d["size"], "font": "NotoJP",
