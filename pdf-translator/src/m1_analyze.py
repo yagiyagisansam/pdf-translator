@@ -306,11 +306,23 @@ def cluster_lines(chars, gutter=None):
     mw = statistics.median([c["x1"] - c["x0"] for c in chars]) or 4.0
     segs = [sorted(s, key=lambda c: (c["x0"], c["top"]))
             for s in _char_segments(chars, gutter=gutter)]
-    from collections import Counter
-    starts = Counter(round(s[0]["x0"]) for s in segs)
-    strong = [x for x, n in starts.items() if n >= 3]
-    def at_edge(x):
-        return any(abs(x - e) <= 1.5 for e in strong)
+    starts = {}
+    for s in segs:
+        starts.setdefault(round(s[0]["x0"]), []).append(s[0]["top"])
+    strong = {x: tops for x, tops in starts.items() if len(tops) >= 3}
+
+    def at_edge(x, top):
+        # the shared left edge must be shared NEARBY: a text island fusing
+        # through this line has rows right beside it. Without the vertical
+        # window, figure labels 100pt+ away form a phantom edge and a
+        # justified prose line whose stretched word gap happens to land there
+        # is torn in two (the torn halves become overlapping duplicate blocks
+        # -> residual English under the Japanese).
+        for e, tops in strong.items():
+            if abs(x - e) <= 1.5 and \
+                    sum(1 for t in tops if abs(t - top) <= 72.0) >= 2:
+                return True
+        return False
     out = []
     for seg in segs:
         cw = statistics.median([c["x1"] - c["x0"] for c in seg]) or mw
@@ -326,7 +338,7 @@ def cluster_lines(chars, gutter=None):
             # label cell ("EMEA | 3,240") still splits: its gap is huge.
             short_head = " " not in head and len(head) <= 12
             need = max(4.0, (2.4 if short_head else 1.2) * cw)
-            if not marker_re.match(head) and at_edge(c["x0"]) \
+            if not marker_re.match(head) and at_edge(c["x0"], c["top"]) \
                     and c["x0"] - cur[-1]["x1"] >= need:
                 out.append(cur); cur = [c]
             else:
@@ -574,6 +586,11 @@ def _is_contact_line(text):
 # (AIAA bracket style) or "[1] S. Solomon..." (initials-first style) - all
 # gated behind an explicit References heading
 REF_RE = re.compile(r"^(?:\d+\.\s+|\[\d+\]\s*)[A-Z](?:[A-Za-z]+|\.)")
+# strict bibliographic entry: number + "Surname, I." or "I. Surname" - strong
+# enough to recognise a reference list that has NO "References" heading
+BIB_RE = re.compile(
+    r"^\[?\d{1,3}[.\]]\s+(?:[A-Z][A-Za-z'’-]+,\s*[A-Z]\.|"
+    r"[A-Z]\.\s*[A-Z][A-Za-z'’-]+,)")
 
 # dedicated math typefaces: TeX (CMMI math italic, CMSY symbols, CMEX big
 # operators, AMS MSAM/MSBM, Euler), OpenType (Cambria Math, STIX Math),
@@ -1175,8 +1192,20 @@ def analyze_pdf(path, name, render=True):
                 ref_heading_seen = True
                 ref_head_top = l["top"] if ref_head_top is None else \
                     min(ref_head_top, l["top"])
-        is_ref = ref_heading_seen and \
-            sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3
+        # HEADINGLESS bibliography: some reports bury the reference list in an
+        # appendix with no "References" heading at all. A run of entries in
+        # strict bibliographic form ("1. Jegley, D., Rouse, M., ..." - number
+        # + Surname + comma + initial-dot) is unmistakable: >=4 of them in the
+        # back half of the document open a reference zone starting at the
+        # first such entry. The strict comma-initial shape keeps numbered
+        # method steps ("1. Participants were...") out.
+        bibn = [b for b in blocks if BIB_RE.match(b["text"].strip())]
+        headingless_bib = pi >= npages * 0.5 and len(bibn) >= 4
+        if headingless_bib and ref_head_top is None:
+            ref_head_top = min(b["top"] for b in bibn)
+        is_ref = (ref_heading_seen and
+                  sum(1 for b in blocks if REF_RE.match(b["text"])) >= 3) or \
+            headingless_bib
         for b in blocks:
             zone = is_ref and (ref_head_top is None or b["top"] >= ref_head_top - 2)
             b["type"] = classify_block(b, body_size, pi, ph, zone)
@@ -1221,7 +1250,7 @@ def analyze_pdf(path, name, render=True):
         # in the BACK HALF of the document: bibliographies live at the end, whereas
         # a numbered METHODS/protocol list ("1. Participants were...") is early and
         # would otherwise poison every following page as "reference" (untranslated).
-        if ref_heading_seen and (is_ref or ref_started) and pi >= npages * 0.5:
+        if (is_ref or ref_started) and pi >= npages * 0.5:
             NUM_RE = re.compile(r"^\[?\d+[.\]]")
             for col in sorted({b.get("col", 0) for b in blocks}):
                 cb = sorted((b for b in blocks if b.get("col", 0) == col),
