@@ -811,6 +811,9 @@ def build(name, src_path, floor=6.0):
     ensure_out()
     layout = json.load(open(f"{OUT}/{name}_layout.json"))
     units = json.load(open(f"{OUT}/{name}_bilingual.json"))
+    # engine ECHOES (target == source: name-and-number rows, acronyms) are
+    # left alone entirely - original English stays, nothing drawn over it
+    units = [u for u in units if not m3.unit_is_echo(u)]
     # SELF-HEAL the subset font before registering: the OUT dir is shared, so
     # another document's run (or a stale build) may have overwritten
     # NotoJP-sub.ttf with a subset that lacks THIS document's characters -

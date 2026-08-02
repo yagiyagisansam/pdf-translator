@@ -904,12 +904,27 @@ def _remaining_after(text, taken_lines):
     n = sum(len(l) for l in taken_lines)
     return text[n:]
 
+def unit_is_echo(u):
+    """The engine returned the source unchanged (a name-and-number row, an
+    acronym): drawing that 'translation' over the original double-prints the
+    same Latin text. Such units are left entirely alone - original ops stay,
+    nothing is drawn."""
+    tgt = (u.get("target") or "").strip()
+    if not tgt:
+        return False
+    if any("぀" <= ch <= "ヿ" or "一" <= ch <= "鿿"
+           for ch in tgt):
+        return False
+    return _norm_txt(tgt) == _norm_txt(u.get("source") or "")
+
+
 # ---- main pipeline -------------------------------------------------------------
 def generate(name, src_path):
     ensure_out()
     _register_fonts(name)
     units=json.load(open(f"{OUT}/{name}_bilingual.json"))
     sanitize_targets(units)
+    units=[u for u in units if not unit_is_echo(u)]
     layout=json.load(open(f"{OUT}/{name}_layout.json"))
     unit_for_block={}
     for u in units:
