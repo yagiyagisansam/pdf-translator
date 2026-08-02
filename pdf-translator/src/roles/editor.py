@@ -665,8 +665,9 @@ def _layout_page(page, page_units, factor, font_of):
             ybR, bxR = _obstacle_geo(page, R["x0"], R["x1"], taken)
             queue = [(u, u.get("target"), True) for u in units
                      if u.get("target")]
-            cur_y = y
-            y_end = y
+            band_y = y          # the band's own top: the right column's
+            cur_y = y           # continuation must not climb above it into
+            y_end = y           # the title/header zone
             for col, yb, bx in ((L, ybL, bxL), (R, ybR, bxR)):
                 if not queue:
                     break
@@ -676,7 +677,7 @@ def _layout_page(page, page_units, factor, font_of):
                     factor, font_of)
                 draws += d
                 y_end = max(y_end, cur_y)
-                cur_y = g["top"]
+                cur_y = band_y
             overflow += _rest_line_count(queue, min(wL, wR), factor, font_of)
             y = y_end + lh_page * PARA_GAP
     return draws, overflow
