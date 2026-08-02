@@ -728,9 +728,36 @@ def ruled_table_zones(lines, rules):
     if not rules:
         return []
     zones = []
-    rs = sorted(rules, key=lambda r: r["top"])
+    # table row rules are often drawn as x-SEGMENTS (one piece per column
+    # group); merge same-y segments into one logical rule or every segment
+    # boundary breaks the chain
+    rs = []
+    for r in sorted(rules, key=lambda r: (r["top"], r["x0"])):
+        if rs and abs(r["top"] - rs[-1]["top"]) <= 2:
+            m = rs[-1]
+            m["x0"] = min(m["x0"], r["x0"]); m["x1"] = max(m["x1"], r["x1"])
+            m["bottom"] = max(m["bottom"], r["bottom"])
+        else:
+            rs.append(dict(r))
+
+    def _cells_between(a, b):
+        rows = {}
+        for l in lines:
+            if a["bottom"] - 1 <= l["top"] and l["bottom"] <= b["top"] + 1 and \
+                    l["x0"] >= min(a["x0"], b["x0"]) - 4 and \
+                    l["x1"] <= max(a["x1"], b["x1"]) + 4:
+                rows.setdefault(round(l["top"] / 6.0), []).append(l)
+        return any(len(v) >= 2 for v in rows.values())
 
     def flush(grp):
+        # trim DECORATIVE edge rules (a heading's underline glued above the
+        # table's top border): an edge rule with no side-by-side row between
+        # it and its neighbour is not part of the grid - keeping it drags the
+        # zone's obstacle box up to the heading and evicts it from its spot
+        while len(grp) >= 3 and not _cells_between(grp[0], grp[1]):
+            grp = grp[1:]
+        while len(grp) >= 3 and not _cells_between(grp[-2], grp[-1]):
+            grp = grp[:-1]
         if len(grp) < 3:
             return
         x0 = min(g["x0"] for g in grp); x1 = max(g["x1"] for g in grp)
@@ -879,7 +906,19 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             return 0.35 * sz <= dx <= 3.0 * sz
         if _NUMHEAD_RE.match(first["text"]):
             gap = l["top"] - b["bottom"]
-            return 0.35 * sz <= dx <= 3.6 * sz and gap <= 0.45 * sz
+            if not (0.35 * sz <= dx <= 3.6 * sz and gap <= 0.45 * sz):
+                return False
+            # never merge under a TORN row (a row-mate segment split off by
+            # an alignment edge): inserting the wrap line between the torn
+            # halves reorders the block text against the content stream and
+            # the removal stops matching (residual English under the JP)
+            fh = (first["bottom"] - first["top"]) or 1.0
+            return not any(
+                m is not first and m is not l
+                and min(first["bottom"], m["bottom"]) -
+                    max(first["top"], m["top"]) >= 0.5 * fh
+                and m["x0"] >= first["x1"] - 2
+                for m in ls)
         return False
 
     # a DOT-LEADER line (TOC row "Title . . . . 1-1-12") is one row of a
