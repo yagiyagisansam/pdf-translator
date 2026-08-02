@@ -120,6 +120,33 @@ def _matches_blob(op_norm, blob, blob_drop=None, op_norm_drop=None,
         return True
     return False
 
+def _split_span_kept(t, kill_blob, keep_blob, keep_tokens):
+    """An op that spans a TRANSLATED cell and a KEPT cell in one show op
+    ("Single User License $2,995" drawn as one Tj) can never fully match the
+    kill blob. Detect the split: a long prefix (or suffix) matching the kill
+    blob while the remainder belongs to a kept block. Returns the kept part's
+    RAW text (for displaced redraw at its block position), or None."""
+    idx = [k for k, ch in enumerate(t) if ch.isascii() and ch.isalnum()]
+    full = "".join(t[k].lower() for k in idx)
+    if len(full) < 8:
+        return None
+
+    def _kept(part):
+        return part and (part in keep_tokens or
+                         any(part in kb for kb in keep_blob))
+    # translated prefix + kept suffix (longest translated part first).
+    # The raw cut starts right AFTER the last translated alnum char, so
+    # punctuation belonging to the kept part ("$" of "$2,995") survives.
+    for cut in range(len(full) - 1, 5, -1):
+        if full[:cut] in kill_blob and _kept(full[cut:]):
+            return t[idx[cut - 1] + 1:].strip()
+    # kept prefix + translated suffix
+    for cut in range(1, len(full) - 5):
+        if full[cut:] in kill_blob and _kept(full[:cut]):
+            return t[:idx[cut]].strip()
+    return None
+
+
 def _op_text(op):
     o = str(op.operator); a = op.operands
     if o == "TJ":
@@ -330,14 +357,16 @@ def keep_tokens_for(p, pi, unit_for_block):
 
 
 def keep_blob_for(p, pi, unit_for_block):
-    """Joined normalized text of each kept block on page pi. Equation and
-    table ops are split FINER than whitespace tokens ("π"+"(context"+")"), so
-    the sweep also needs a substring-level notion of 'this belongs to a kept
-    block'."""
-    trans = {"body", "heading", "caption", "title", "label"}
+    """Joined normalized text of each kept DATA block (display equations,
+    table/spec cells) on page pi. Their ops are split FINER than whitespace
+    tokens ("π"+"(context"+")"), so the sweep needs a substring-level notion
+    of 'this belongs to a kept block'. Restricted to `data` on purpose:
+    running heads / page furniture share ordinary words with the prose
+    ("Technology"), and including them made torn prose tails ambiguous and
+    un-droppable."""
     blobs = []
-    for bi, b in enumerate(p["blocks"]):
-        if b["type"] in trans and f"{pi}:{bi}" in unit_for_block:
+    for b in p["blocks"]:
+        if b["type"] != "data":
             continue
         n = _norm_txt(b.get("text", ""))
         if len(n) >= 2:
@@ -433,6 +462,18 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                                      "fi", "fl", "ff", "ffi", "ffl") and \
                     _norm_txt(t) and _norm_txt(t) in kill_blob:
                 dropped[i]=True
+            else:
+                # one op spanning a translated cell AND a kept cell ("Single
+                # User License $2,995" as a single Tj) never fully matches
+                # the blob: drop the whole op and redraw the kept part at its
+                # block's true position via the displaced channel
+                kept_part = _split_span_kept(t, kill_blob, keep_blob,
+                                             keep_tokens)
+                if kept_part is not None:
+                    dropped[i]=True
+                    _disp = kwargs.get("displaced")
+                    if _disp is not None and kept_part.strip():
+                        _disp.append(kept_part)
     text_idx=[i for i in range(len(ops)) if is_text[i]]
     pos={idx:k for k,idx in enumerate(text_idx)}
     # resolve deferred (ambiguous) drops by stream context: the PROSE copy of
