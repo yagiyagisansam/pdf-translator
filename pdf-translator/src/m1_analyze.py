@@ -717,6 +717,58 @@ def _typical_line_gap(lines):
     return statistics.median(gaps) if gaps else 4.0
 
 
+def ruled_table_zones(lines, rules):
+    """Bounding boxes of RULED TABLES: >=3 stacked horizontal rules sharing an
+    x-span, enclosing >=2 visual rows that hold 2+ side-by-side lines (the
+    table signature - a stack of section separators encloses prose and never
+    qualifies). Spec tables with prose-y cells ("2x diesel engines, 10
+    knots...") fail the numeric row-mate test, chain into the body flow and
+    the translation walks straight across the table; inside a zone EVERY line
+    seals into its own cell instead."""
+    if not rules:
+        return []
+    zones = []
+    rs = sorted(rules, key=lambda r: r["top"])
+
+    def flush(grp):
+        if len(grp) < 3:
+            return
+        x0 = min(g["x0"] for g in grp); x1 = max(g["x1"] for g in grp)
+        top = min(g["top"] for g in grp); bot = max(g["bottom"] for g in grp)
+        rows = {}
+        for l in lines:
+            if l["top"] >= top - 2 and l["bottom"] <= bot + 2 and \
+                    l["x0"] >= x0 - 4 and l["x1"] <= x1 + 4:
+                rows.setdefault(round(l["top"] / 6.0), []).append(l)
+        if sum(1 for v in rows.values() if len(v) >= 2) >= 2:
+            zones.append((x0, top, x1, bot))
+
+    grp = []
+    for r in rs:
+        if grp:
+            p = grp[-1]
+            ov = min(r["x1"], p["x1"]) - max(r["x0"], p["x0"])
+            w = min(r["x1"] - r["x0"], p["x1"] - p["x0"]) or 1.0
+            # a strip between two rules that holds ONLY single-per-row lines
+            # is prose or a section heading between two ADJACENT tables -
+            # the zone must break there, or the heading gets sealed into the
+            # table and the whole page's flow is pushed below a mega-zone
+            strip = [l for l in lines
+                     if p["bottom"] - 1 <= l["top"] and l["bottom"] <= r["top"] + 1
+                     and l["x0"] >= min(p["x0"], r["x0"]) - 4
+                     and l["x1"] <= max(p["x1"], r["x1"]) + 4]
+            srows = {}
+            for l in strip:
+                srows.setdefault(round(l["top"] / 6.0), []).append(l)
+            prose_strip = bool(strip) and \
+                not any(len(v) >= 2 for v in srows.values())
+            if r["top"] - p["top"] > 110 or ov < 0.7 * w or prose_strip:
+                flush(grp); grp = []
+        grp.append(r)
+    flush(grp)
+    return zones
+
+
 def group_blocks(lines, mid, left, right, body_size, rules=()):
     """Build blocks in 2D: a line joins an open block only when it is vertically
     adjacent AND horizontally aligned with it (x-overlap or shared left edge) AND
@@ -826,10 +878,18 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
     # into a single segment - sealing it keeps rows from chaining into one
     # run-on paragraph of dots
     _leader = re.compile(r"(?:[.·⋅]\s*){5,}")
+    _tzones = ruled_table_zones(ls, rules)
+
+    def _in_table_zone(l):
+        return any(zx0 - 4 <= l["x0"] and l["x1"] <= zx1 + 6 and
+                   zt - 2 <= l["top"] and l["bottom"] <= zb + 2
+                   for (zx0, zt, zx1, zb) in _tzones)
+
     record_rows, list_rows, math_rows = set(), set(), []
     for l in ls:
         why = _is_record_row(l)
-        if why or _is_contact_line(l["text"]) or _leader.search(l["text"]):
+        if why or _is_contact_line(l["text"]) or _leader.search(l["text"]) \
+                or _in_table_zone(l):
             record_rows.add(id(l))
         if why == "list":
             list_rows.add(id(l))
@@ -980,7 +1040,19 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                 # ONLY tight in-cell stacks: separate table/TOC rows have a
                 # visible row gap (>=~0.5 line height) and are usually wide -
                 # merging them would undo the row sealing entirely
+                # a row-separator RULE between the two stacks marks a ROW
+                # boundary: never merge across it (a dense spec table's row
+                # gap can be tighter than a header cell's line pitch, and the
+                # whole column collapsed into one crammed mega-cell)
+                _lo = min(a["bottom"], c["bottom"])
+                _hi = max(a["top"], c["top"])
+                _xlo = max(a["x0"], c["x0"]); _xhi = min(a["x1"], c["x1"])
+                rule_between = any(
+                    _lo - 1 <= (r["top"] + r["bottom"]) / 2 <= _hi + 1 and
+                    min(r["x1"], _xhi) - max(r["x0"], _xlo) > 4
+                    for r in rules)
                 if ov >= 0.7 * wmin and gap <= 0.4 * lh and \
+                        not rule_between and \
                         wmax <= 0.3 * page_text_w and \
                         max(s1, s2) / max(0.1, min(s1, s2)) <= 1.25:
                     a["lines"] += c["lines"]
@@ -1496,6 +1568,7 @@ def analyze_pdf(path, name, render=True):
             "top_off": 0.0,
             "columns": 2 if mid else 1, "body_size": body_size,
             "blocks": ordered, "figures": figs, "rules": rules,
+            "table_zones": [list(z) for z in ruled_table_zones(lines, rules)],
         })
         # MEMORY: pdfplumber caches every page's parsed objects for the life of
         # the document - on a dense 200k+ char PDF that alone exceeds a small
