@@ -1018,7 +1018,8 @@ def _numericish(text):
     if not toks or not _DIGIT_ANY_RE.search(text):
         return False
     hits = sum(1 for t in toks
-               if re.fullmatch(r"[\d.,%×x±+\-/()<>≈=]+", t) or _UNIT_TOKEN_RE.match(t))
+               if re.fullmatch(r"[$€£¥]?[\d.,%×x±+\-/()<>≈=]+", t)
+               or _UNIT_TOKEN_RE.match(t))
     return hits / len(toks) > 0.5
 
 

@@ -532,15 +532,6 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         raw_i=(op_uni[i] if op_uni[i] is not None else _op_text(ops[i])).strip()
         if raw_i and _norm_txt(raw_i) in keep_tokens:
             continue
-        # sub-token pieces of a kept equation ("log", "(context", a lone Σ):
-        # ops are split finer than whitespace tokens, so exact-token
-        # protection misses them. Protect >=2-char pieces found inside a
-        # kept block's joined text, and single NON-ASCII glyphs (math
-        # symbols) likewise - single ASCII letters stay sweepable (they are
-        # the classic torn-tail fragments the sweep exists for).
-        _ni = _norm_txt(raw_i)
-        if _ni and (len(_ni) >= 2 or ord(_ni[0]) > 127) and _in_keep_blob(_ni):
-            continue
         k=pos[i]
         # SEAM TAIL/HEAD: the op is the torn end of a word whose main op was
         # dropped ("Operato"|"r"): joined with the dropped neighbour it
@@ -563,6 +554,18 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                                               blob_nodigit=blob_nodigit):
                 dropped[i]=True
                 continue
+        # sub-token pieces of a kept equation ("log", "(context", a lone Σ):
+        # ops are split finer than whitespace tokens, so exact-token
+        # protection misses them. Protect >=2-char pieces found inside a
+        # kept block's joined text, and single NON-ASCII glyphs (math
+        # symbols) likewise. This runs AFTER the seam-join checks above: a
+        # torn prose tail ("T|echnology") whose joined text matches the kill
+        # blob is dropped there, even when the same letters occur in a kept
+        # running head - only pieces the kill blob does not claim reach this
+        # protection.
+        _ni = _norm_txt(raw_i)
+        if _ni and (len(_ni) >= 2 or ord(_ni[0]) > 127) and _in_keep_blob(_ni):
+            continue
         # Scan left/right SKIPPING over consecutive fragment ops to the nearest
         # NON-fragment text op. Drop this fragment only if the body text bounding
         # its run was itself dropped on BOTH sides - i.e. it is wedged inside a
