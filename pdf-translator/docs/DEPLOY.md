@@ -30,31 +30,22 @@
      **パスワード**を設定します。サイト全体にログイン画面が出て、パスワードを
      知っている人だけが開けます(下の「自分だけアクセス可にする」参照)。
 
-> コードを更新して `main` にマージすると、Render が自動で再デプロイします。
+### デプロイは手動のみ(2026-08-02 決定)
 
-### 自動デプロイが動かない場合(Deploy Hook で確実に自動化)
+自動デプロイ(GitHub 連携)が安定して効かないため、**解除済み**です。
+`main` にマージしてもデプロイは走りません。反映したい時は毎回手動で行います:
 
-Render 側の自動デプロイ(GitHub 連携)が効かないことがあります。その場合は
-**Deploy Hook** を GitHub Actions から叩く方式に切り替えると、`main` への
-マージで確実にデプロイされます(Claude からの手動トリガーも可能になります)。
-スマホだけで設定できます:
+- **通常の手順(iPhone のブラウザで可)**: Render ダッシュボード →
+  サービス(pdf-en-ja-translator) → **Manual Deploy** →
+  **Deploy latest commit**。
+- 予備手段: GitHub → **Actions** → **Deploy to Render** → **Run workflow**
+  (リポジトリシークレット `RENDER_DEPLOY_HOOK` が設定済みの場合のみ動作。
+  未設定なら何もしません)。
 
-1. **Render の Deploy Hook URL をコピー**:
-   Render ダッシュボード → サービス(pdf-en-ja-translator) → **Settings** →
-   **Deploy Hook** の URL(`https://api.render.com/deploy/srv-...?key=...`)をコピー。
-2. **GitHub にシークレットとして登録**:
-   GitHub のリポジトリ → **Settings** → **Secrets and variables** → **Actions** →
-   **New repository secret** で
-   - Name: `RENDER_DEPLOY_HOOK`
-   - Secret: コピーした URL
-   を保存。
-3. 以後、`main` に push/マージされるたびに `.github/workflows/render-deploy.yml`
-   が Hook を叩いて Render がデプロイします。手動で今すぐデプロイしたい時は
-   GitHub → **Actions** → **Deploy to Render** → **Run workflow**。
-
-> シークレット未設定の間はこのワークフローは何もしません(CI は壊れません)。
-> 二重デプロイを避けたい場合は、Render 側の Settings → **Auto-Deploy** を
-> **Off** にしてください(Hook 経由のみでデプロイされるようになります)。
+解除内容(リポジトリ側): `render.yaml` に `autoDeploy: false` を設定し、
+`.github/workflows/render-deploy.yml` から push トリガーを削除済み。
+Render 側の Settings → **Auto-Deploy** も **Off** になっているか一度
+確認してください(Blueprint 連携なら `autoDeploy: false` が反映されます)。
 
 ---
 

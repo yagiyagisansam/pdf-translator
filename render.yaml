@@ -6,6 +6,9 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
+    # Deploys are MANUAL ONLY (run from the Render dashboard). Auto-deploy on
+    # push stopped working reliably, so it is disabled by decision (2026-08-02).
+    autoDeploy: false
     envVars:
       # Optional: set a Gemini key here to enable the free-tier LLM engine for
       # everyone, or leave unset and paste the key per-job in the web UI.

@@ -1,16 +1,15 @@
 name: Deploy to Render
 
-# Triggers a Render deploy of the latest main via the service's Deploy Hook,
-# on every push to main and on manual run (Actions → Deploy to Render →
-# Run workflow). Requires ONE repository secret (settable from a phone
-# browser: GitHub → Settings → Secrets and variables → Actions):
+# MANUAL ONLY (Actions → Deploy to Render → Run workflow). The automatic
+# deploy-on-push trigger was removed 2026-08-02: auto-deploy stopped working
+# reliably, so all production deploys are done by hand (normally from the
+# Render dashboard; this workflow is a phone-friendly fallback).
+# Requires ONE repository secret:
 #   RENDER_DEPLOY_HOOK – the service's Deploy Hook URL, copied from
 #     Render dashboard → your service → Settings → Deploy Hook.
 # If the secret is absent the job is skipped, so this never breaks CI.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
