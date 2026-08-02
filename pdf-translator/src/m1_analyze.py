@@ -859,19 +859,28 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
         return None
 
     _MARK_RE = re.compile(r"^(?:[•‣⁃▪●·∙–—-]|\d{1,2}[.)])\s+")
+    _NUMHEAD_RE = re.compile(r"^\d{1,2}(?:\.\d+)+[.)]?\s+")
 
     def _hang_cont(l, b):
         """l looks like the WRAPPED CONTINUATION of a list item: block b opens
         with a marker line, l carries no marker of its own, and l's left edge
         sits roughly one marker-width right of the item's edge (the classic
         hanging indent). Size similarity and vertical adjacency are already
-        enforced by the caller's other guards."""
+        enforced by the caller's other guards. A numbered section title
+        ("6.48. When the corresponding noun form ...") wraps the same way but
+        only joins with TIGHT leading - the split halves otherwise translate
+        separately and the two drawings overlap."""
         first = b["lines"][0]
-        if not _MARK_RE.match(first["text"]) or _MARK_RE.match(l["text"]):
+        if _MARK_RE.match(l["text"]) or _NUMHEAD_RE.match(l["text"]):
             return False
         sz = l["size"] or b["size_med"] or 10.0
         dx = l["x0"] - first["x0"]
-        return 0.35 * sz <= dx <= 3.0 * sz
+        if _MARK_RE.match(first["text"]):
+            return 0.35 * sz <= dx <= 3.0 * sz
+        if _NUMHEAD_RE.match(first["text"]):
+            gap = l["top"] - b["bottom"]
+            return 0.35 * sz <= dx <= 3.6 * sz and gap <= 0.45 * sz
+        return False
 
     # a DOT-LEADER line (TOC row "Title . . . . 1-1-12") is one row of a
     # leadered list even when the leader glues the title and the page number
@@ -886,10 +895,13 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                    for (zx0, zt, zx1, zb) in _tzones)
 
     record_rows, list_rows, math_rows = set(), set(), []
+    zone_rows = set()
     for l in ls:
         why = _is_record_row(l)
-        if why or _is_contact_line(l["text"]) or _leader.search(l["text"]) \
-                or _in_table_zone(l):
+        if _in_table_zone(l):
+            record_rows.add(id(l))
+            zone_rows.add(id(l))
+        if why or _is_contact_line(l["text"]) or _leader.search(l["text"]):
             record_rows.add(id(l))
         if why == "list":
             list_rows.add(id(l))
@@ -999,7 +1011,8 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             blk = {"lines": [l], "x0": l["x0"], "x1": l["x1"],
                    "top": l["top"], "bottom": l["bottom"],
                    "size_med": l["size"], "record": id(l) in record_rows,
-                   "list": id(l) in list_rows}
+                   "list": id(l) in list_rows,
+                   "cell": id(l) in zone_rows}
             # a record row (TOC/table row) is sealed: one line = one block,
             # nothing may attach to it
             (done if id(l) in record_rows else open_blocks).append(blk)
@@ -1071,6 +1084,8 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             blk["record"] = True
         if b.get("list"):
             blk["list"] = True
+        if b.get("cell"):
+            blk["cell"] = True
         blocks.append(blk)
     return blocks
 

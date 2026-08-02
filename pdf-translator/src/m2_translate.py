@@ -275,6 +275,12 @@ def build_units(layout):
                 # would chain the whole column into one run-on unit
                 if pb.get("list") or nb.get("list"):
                     break
+                # RULED-TABLE CELLS are one-per-cell units: the lowercase-
+                # continuation heuristic would chain a whole spec-table column
+                # ("2x diesels, 10.5 knots" -> "1x jeep or...") into one unit
+                # drawn as a crammed paragraph at the first cell
+                if pb.get("cell") or nb.get("cell"):
+                    break
                 # a FIGURE-INTERNAL LABEL (bubble caption, legend entry) is a
                 # standalone element drawn strictly in place - never chained
                 # into a paragraph with its neighbours
