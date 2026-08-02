@@ -280,6 +280,11 @@ def build_units(layout):
                 # into a paragraph with its neighbours
                 if pb["type"] == "label" or nb["type"] == "label":
                     break
+                # CAPTIONS are self-contained: chaining one into the body
+                # flow drags paragraphs into the caption column (and pulls a
+                # caption's own text out of it) across pages
+                if pb["type"] == "caption" or nb["type"] == "caption":
+                    break
                 flag_link = pb.get("continues_to_next_page") and nb.get("continues_from_prev_page")
                 if flag_link or _continues(pb["text"], nb["text"], nb["type"]):
                     parts.append((npi, nbi, nb))

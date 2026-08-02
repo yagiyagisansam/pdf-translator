@@ -354,16 +354,29 @@ def find_gutter(chars, page_w, x0=0):
     band = width * 0.04
     col_chars = []
     crossing = 0
+    mid_crossing = 0
+    tops = [c["top"] for c in chars]
+    t_lo, t_hi = min(tops), max(tops)
+    t_span = max(t_hi - t_lo, 1.0)
     for seg in _char_segments(chars):
         rl = min(c["x0"] for c in seg); rr = max(c["x1"] for c in seg)
         if rl < mid_guess - band and rr > mid_guess + band:
             crossing += len(seg)
+            st = statistics.median(c["top"] for c in seg)
+            # crossing lines in the MIDDLE of the page: a real two-column
+            # page only crosses at the top (title/abstract) or the bottom
+            # (footer); mid-page full-width paragraphs mean the "columns"
+            # are actually a photo beside text (book/magazine layout)
+            if 0.3 < (st - t_lo) / t_span < 0.9:
+                mid_crossing += len(seg)
             continue
         col_chars.extend(seg)
     # a page whose text is MOSTLY full-width lines is a single-column page
     # with an inset box/sidebar - the side-confined leftovers must not
     # fabricate a gutter (paragraphs would reflow into phantom half lanes)
     if crossing > 0.5 * len(chars):
+        return None
+    if mid_crossing > 0.2 * len(chars):
         return None
     if len(col_chars) < 40:
         col_chars = chars  # fallback
@@ -476,7 +489,20 @@ def detect_columns(lines, page_w):
     leftc = sum(1 for l in lines if l["x1"] < mid + band)
     rightc = sum(1 for l in lines if l["x0"] > mid - band)
     crossing = sum(1 for l in lines if l["x0"] < mid - band and l["x1"] > mid + band)
+    # crossing lines in the page's vertical MIDDLE: a real two-column page
+    # crosses only at the top (title/abstract) or bottom (footer). Mid-page
+    # full-width paragraphs mean photo-beside-text (book layout), where a
+    # phantom gutter shreds the reflow into bogus half lanes.
+    tops = [l["top"] for l in lines]
+    t_lo, t_hi = min(tops), max(tops)
+    t_span = max(t_hi - t_lo, 1.0)
+    crossing_mid = sum(
+        1 for l in lines
+        if l["x0"] < mid - band and l["x1"] > mid + band
+        and 0.3 < (l["top"] - t_lo) / t_span < 0.9)
     total = len(lines)
+    if crossing_mid > max(3, 0.1 * total):
+        return None
     if total >= 8 and leftc >= total * 0.25 and rightc >= total * 0.25 and crossing <= total * 0.25:
         return mid
     return None
@@ -648,6 +674,19 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                     return True
         return False
 
+    # x0 histogram of SHORT NUMERIC lines: >=3 sharing a left edge form a
+    # page-number/value COLUMN (a leaderless TOC, a spec table). Rows facing
+    # such a column seal regardless of the normal gap cap - a short title
+    # sits far from the number column, but the row is still one record.
+    from collections import Counter as _Ctr
+    _num_x0 = _Ctr(round(m["x0"]) for m in lines
+                   if _numericish(m["text"]) and len(m["text"].strip()) <= 8)
+
+    def _in_num_col(m):
+        return _numericish(m["text"]) and len(m["text"].strip()) <= 8 and \
+            sum(v for k, v in _num_x0.items()
+                if abs(k - round(m["x0"])) <= 2) >= 3
+
     def _is_record_row(l):
         """A line with a NEARBY row-mate that is NUMERIC (a TOC row next to its
         page number, a spec label next to its value) or that shares a RULED
@@ -664,6 +703,16 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             if ov < 0.5 * min(lh, (m["bottom"] - m["top"]) or 1.0):
                 continue
             gap = max(m["x0"] - l["x1"], l["x0"] - m["x1"], 0.0)
+            # a row-mate in an ALIGNED numeric column (or this numeric line's
+            # own text mate) seals the row even across a wide gap - and the
+            # NUMBER lines themselves must seal too, or consecutive numbers
+            # fuse into one block ("12 16") and the rows above lose their
+            # mates entirely
+            if gap <= 0.9 * page_text_w:
+                if _in_num_col(m) and not _numericish(l["text"]):
+                    return "cell"
+                if _in_num_col(l) and not _numericish(m["text"]):
+                    return "cell"
             # financial tables put a wide gutter between the label column and
             # its value columns ("EMEA ......... $ 3,240"); 15% missed them and
             # the label rows chained into one run-on block. A numeric row-mate
@@ -1030,6 +1079,38 @@ def analyze_pdf(path, name, render=True):
         for b in blocks:
             zone = is_ref and (ref_head_top is None or b["top"] >= ref_head_top - 2)
             b["type"] = classify_block(b, body_size, pi, ph, zone)
+        # SIDE CAPTIONS: a NARROW block in SMALLER type sitting OUTSIDE the
+        # main text column (left/right margin) is a photo caption. Typing it
+        # `caption` matters beyond semantics: M2 must never chain a caption
+        # into the body flow (a margin caption gluing two pages' body text
+        # into one unit drags whole paragraphs into the caption column and
+        # leaves the body area blank).
+        # the MAIN column is defined by the BODY paragraphs (a display title
+        # can start at the page edge and would stretch the range over the
+        # margin captions); headings only serve as fallback
+        _tt = ("body", "heading", "caption", "title")
+        _bw_ = [b["x1"] - b["x0"] for b in blocks if b["type"] == "body"]
+        _tw = _bw_ or [b["x1"] - b["x0"] for b in blocks if b["type"] in _tt]
+        if _tw:
+            _wmax = max(_tw)
+            _src = "body" if _bw_ else None
+            _main = [b for b in blocks
+                     if (b["type"] == _src if _src else b["type"] in _tt)
+                     and (b["x1"] - b["x0"]) >= 0.45 * _wmax]
+            if _main:
+                _mx0 = min(b["x0"] for b in _main)
+                _mx1 = max(b["x1"] for b in _main)
+                for b in blocks:
+                    if b["type"] not in ("body", "heading"):
+                        continue
+                    bw = b["x1"] - b["x0"]
+                    if bw > 0.35 * max(_mx1 - _mx0, 1.0):
+                        continue
+                    if not b.get("size") or b["size"] > body_size * 0.85:
+                        continue
+                    ov = min(b["x1"], _mx1) - max(b["x0"], _mx0)
+                    if ov < 0.5 * bw:
+                        b["type"] = "caption"
         # A bibliography entry spans several lines but only the FIRST (numbered)
         # line matches REF_RE; the continuation lines fell through to "body" and got
         # translated. Once the numbered list has started it runs to the document end,

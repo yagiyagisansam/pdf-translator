@@ -184,6 +184,141 @@ def _unit_lines(units, factor, width, font_of):
     return out
 
 
+def _obstacle_geo(page, x0, x1, taken):
+    """(ybands, boxes) for the L-SHAPED flow. Rules cut the full lane width
+    (a table border must never have text straddle it); figures, kept text and
+    margin-unit rects block only their OWN x-range, so body text can continue
+    BESIDE a photo the way the source magazine/book layout does."""
+    boxes = []
+    for f in _obstacle_figs(page):
+        if _overlaps(x0, x1, f["x0"], f["x1"]):
+            boxes.append((f["x0"] - 4, f["x1"] + 4, f["top"] - 4,
+                          f["bottom"] + 4))
+    for b in page["blocks"]:
+        if (b["type"] in KEPT or b.get("_keep_en")) and \
+                _overlaps(x0, x1, b["x0"], b["x1"]):
+            if _badge_like(b):
+                boxes.append((b["x0"] - 6, b["x1"] + 6, b["top"] - 14,
+                              b["bottom"] + 8))
+            else:
+                boxes.append((b["x0"] - 2, b["x1"] + 2, b["top"] - 2,
+                              b["bottom"] + 2))
+    ybands = []
+    for r in page.get("rules", []):
+        if _overlaps(x0, x1, r["x0"], r["x1"]):
+            ybands.append((r["top"] - 3, r["bottom"] + 3))
+    for (tx0, tx1, tt, tb) in taken:
+        if not (tx1 <= x0 or tx0 >= x1):
+            boxes.append((tx0, tx1, tt, tb))
+    return _merged_bands(ybands), boxes
+
+
+def _flow_units_lshape(units, x0, width, y, y_bottom, ybands, boxes, factor,
+                       font_of):
+    """Flow units down the lane, NARROWING around partial-width obstacles: in
+    a band where a photo covers only part of the lane, lines are wrapped at
+    the remaining width beside it (magazine wrap) instead of skipping the
+    whole band - the fix for book pages whose text hugs the pictures.
+    `units` entries are units or (unit, remaining_text, need_anchor) tuples.
+    Returns (draws, y_end, rest) where rest carries the undrawn tail in the
+    same tuple form, ready to continue in another column."""
+    draws = []
+    lane_x1 = x0 + width
+    min_w = max(80.0, 0.30 * width)
+
+    def free_at(yy, lh):
+        cut = [(max(bx0, x0), min(bx1, lane_x1))
+               for (bx0, bx1, t, b) in boxes
+               if yy < b and yy + lh > t and bx0 < lane_x1 and bx1 > x0]
+        if not cut:
+            return x0, width, None
+        cut.sort()
+        occ = []
+        for a, b2 in cut:
+            if occ and a <= occ[-1][1] + 1:
+                occ[-1] = (occ[-1][0], max(occ[-1][1], b2))
+            else:
+                occ.append((a, b2))
+        frees = []
+        prev = x0
+        for a, b2 in occ:
+            if a - prev > 1:
+                frees.append((prev, a - prev))
+            prev = max(prev, b2)
+        if lane_x1 - prev > 1:
+            frees.append((prev, lane_x1 - prev))
+        best = max(frees, key=lambda f: f[1]) if frees else None
+        if best is None or best[1] < min_w:
+            nb = min(b for (bx0, bx1, t, b) in boxes
+                     if yy < b and yy + lh > t and bx0 < lane_x1 and bx1 > x0)
+            return None, None, nb
+        return best[0], best[1], None
+
+    rest_out = []
+    dead = False
+    for k, item in enumerate(units):
+        if isinstance(item, tuple):
+            u, text, need_anchor = item
+        else:
+            u, text, need_anchor = item, item.get("target"), True
+        if not text:
+            continue
+        font = font_of(u)
+        color = tuple(u.get("_color") or (0, 0, 0))
+        size = _unit_size(u, factor)
+        lh = size * LR
+        if dead:
+            rest_out.append((u, text, need_anchor))
+            continue
+        if draws:
+            gap = HEAD_GAP if u["type"] in ("heading", "title") else PARA_GAP
+            y += lh * max(1, round(gap))
+        # VERTICAL ANCHOR per unit: never start above the unit's own source
+        # top - Japanese that ran short must not pull later sections upward
+        # (a TOC's sub-entries migrating above their own heading). A
+        # CONTINUATION (tail spilling into the next column) is exempt: it
+        # already anchored at its first placement.
+        if need_anchor:
+            y = max(y, u.get("_top", y))
+        is_head = u["type"] in ("heading", "title")
+        remaining = text
+        while remaining:
+            while True:
+                hit = next(((t, b) for (t, b) in ybands
+                            if y < b and y + lh > t), None)
+                if hit is None:
+                    break
+                y = hit[1]
+            if y + lh > y_bottom + 0.1:
+                rest_out.append((u, remaining, False))
+                dead = True
+                break
+            fx, fw, nb = free_at(y, lh)
+            if fx is None:
+                y = nb
+                continue
+            wl = m3._wrap(remaining, font, size, fw)
+            ln = wl[0]
+            rest = m3._remaining_after(remaining, [ln])
+            draws.append({"x": fx, "y_top": y, "size": size, "font": font,
+                          "line": ln, "width": fw,
+                          "justify": bool(rest) and not is_head,
+                          "color": color})
+            y += lh
+            remaining = rest
+    return draws, y, rest_out
+
+
+def _rest_line_count(rest, width, factor, font_of):
+    """Line count of undrawn tails (for the overflow metric)."""
+    n = 0
+    for u, text, _ in rest:
+        if text:
+            n += len(m3._wrap(text, font_of(u), _unit_size(u, factor),
+                              max(10.0, width)))
+    return n
+
+
 def _capacity(y, y_bottom, bands, lh):
     """How many lines of height lh fit from y to y_bottom, skipping obstacles."""
     n = 0
@@ -225,8 +360,13 @@ def _page_geom(page):
     # only: a margin artifact (a section number "3.1" in the left margin, a
     # side caption) must not widen the main flow to the page edge. Substantial
     # = at least 45% as wide as the widest translatable block.
-    wmax = max(b["x1"] - b["x0"] for b in trans)
-    main = [b for b in trans if (b["x1"] - b["x0"]) >= 0.45 * wmax] or trans
+    # prefer BODY paragraphs for the lane bounds: a display title starting at
+    # the page edge would stretch the lane over the margin-caption column and
+    # the captions would then flow as lane text instead of keeping their box
+    bodies = [b for b in trans if b["type"] == "body"]
+    base = bodies or trans
+    wmax = max(b["x1"] - b["x0"] for b in base)
+    main = [b for b in base if (b["x1"] - b["x0"]) >= 0.45 * wmax] or base
     Lx0 = min(b["x0"] for b in main); Lx1 = max(b["x1"] for b in main)
     top = min(b["top"] for b in trans)
     bottom = min(max(b["bottom"] for b in body), page["height"] * 0.94)
@@ -456,10 +596,14 @@ def _layout_page(page, page_units, factor, font_of):
         band_top = min((u.get("_top", y) for u in units_in_band), default=y)
         y = max(y, band_top)
         if kind == "full":
-            lines = _unit_lines(payload, factor, g["Lx1"] - g["Lx0"], font_of)
-            d, y, rem = _flow_column(lines, g["Lx0"], g["Lx1"] - g["Lx0"], y,
-                                     g["bottom"], full_obs)
-            draws += d; overflow += len(rem); y += lh_page * PARA_GAP
+            ybands, boxes = _obstacle_geo(page, g["Lx0"], g["Lx1"], taken)
+            d, y, rem = _flow_units_lshape(payload, g["Lx0"],
+                                           g["Lx1"] - g["Lx0"], y,
+                                           g["bottom"], ybands, boxes,
+                                           factor, font_of)
+            draws += d; y += lh_page * PARA_GAP
+            overflow += _rest_line_count(rem, g["Lx1"] - g["Lx0"], factor,
+                                         font_of)
         else:
             # Newspaper-style balanced two-column flow: combine BOTH lanes in
             # reading order into one stream, fill the LEFT column top-to-bottom
@@ -475,10 +619,14 @@ def _layout_page(page, page_units, factor, font_of):
                 if col is None:
                     overflow += len(units); continue
                 w = col["x1"] - col["x0"]
-                lines = _unit_lines(units, factor, w, font_of)
-                bands = obs_for(col["x0"], col["x1"])
-                d, y, rem = _flow_column(lines, col["x0"], w, y, g["bottom"], bands)
-                draws += d; overflow += len(rem); y = g["bottom"] + lh_page * PARA_GAP
+                ybands, boxes = _obstacle_geo(page, col["x0"], col["x1"],
+                                              taken)
+                d, y, rem = _flow_units_lshape(units, col["x0"], w, y,
+                                               g["bottom"], ybands, boxes,
+                                               factor, font_of)
+                draws += d; overflow += _rest_line_count(rem, w, factor,
+                                                         font_of)
+                y = g["bottom"] + lh_page * PARA_GAP
                 continue
             wL, wR = L["x1"] - L["x0"], R["x1"] - R["x0"]
             if min(wL, wR) / max(wL, wR) < 0.7:
@@ -491,42 +639,47 @@ def _layout_page(page, page_units, factor, font_of):
                     if not lus:
                         continue
                     wl = col["x1"] - col["x0"]
-                    bands = obs_for(col["x0"], col["x1"])
+                    ybands, boxes = _obstacle_geo(page, col["x0"],
+                                                  col["x1"], taken)
                     ly = g["top"]
                     for u in lus:
                         ly = max(ly, u.get("_top", ly))   # per-unit anchor
-                        lines = _unit_lines([u], factor, wl, font_of)
-                        d, ly, rem = _flow_column(lines, col["x0"], wl, ly,
-                                                  g["bottom"], bands)
-                        draws += d; overflow += len(rem)
+                        d, ly, rem = _flow_units_lshape(
+                            [u], col["x0"], wl, ly, g["bottom"],
+                            ybands, boxes, factor, font_of)
+                        draws += d
+                        overflow += _rest_line_count(rem, wl, factor,
+                                                     font_of)
                         ly += _unit_size(u, factor) * LR * PARA_GAP
                     y = max(y, ly)
                 y += lh_page * PARA_GAP
                 continue
-            w = min(wL, wR)                # wrap to the narrower
-            lines = _unit_lines(units, factor, w, font_of)
-            Lbands = obs_for(L["x0"], L["x1"])
-            Rbands = obs_for(R["x0"], R["x1"])
-            Lcap = _capacity(y, g["bottom"], Lbands, lh_page)
-            Rcap = _capacity(y, g["bottom"], Rbands, lh_page)
-            # BALANCE: split by column capacity so both columns fill to roughly
-            # equal height, instead of packing the left column full and leaving
-            # the right empty. The right column may hold less (e.g. a table), so
-            # weight the split by each column's capacity.
-            total = len(lines)
-            if Lcap + Rcap > 0:
-                target_left = min(Lcap, round(total * Lcap / (Lcap + Rcap)))
-                if total - target_left > Rcap:      # push extra left if right can't hold it
-                    target_left = min(Lcap, total - Rcap)
-            else:
-                target_left = 0
-            d, yl, _ = _flow_column(lines[:target_left], L["x0"], w, y,
-                                    g["bottom"], Lbands)
-            draws += d
-            d, yr, rem = _flow_column(lines[target_left:], R["x0"], w, y,
-                                      g["bottom"], Rbands)
-            draws += d; overflow += len(rem)
-            y = max(yl, yr) + lh_page * PARA_GAP
+            # NEWSPAPER CONTINUATION with layout fidelity: fill the left
+            # column, spill the tail into the right column - but every unit
+            # ANCHORS at its own source top on first placement (a heading
+            # sourced below a table must never float above it, and body text
+            # must never climb into a top-right caption/margin zone), and
+            # both columns flow L-SHAPED around partial-width obstacles.
+            # Continuation tails are anchor-exempt (they anchored already).
+            ybL, bxL = _obstacle_geo(page, L["x0"], L["x1"], taken)
+            ybR, bxR = _obstacle_geo(page, R["x0"], R["x1"], taken)
+            queue = [(u, u.get("target"), True) for u in units
+                     if u.get("target")]
+            band_y = y          # the band's own top: the right column's
+            cur_y = y           # continuation must not climb above it into
+            y_end = y           # the title/header zone
+            for col, yb, bx in ((L, ybL, bxL), (R, ybR, bxR)):
+                if not queue:
+                    break
+                wl = col["x1"] - col["x0"]
+                d, cur_y, queue = _flow_units_lshape(
+                    queue, col["x0"], wl, cur_y, g["bottom"], yb, bx,
+                    factor, font_of)
+                draws += d
+                y_end = max(y_end, cur_y)
+                cur_y = band_y
+            overflow += _rest_line_count(queue, min(wL, wR), factor, font_of)
+            y = y_end + lh_page * PARA_GAP
     return draws, overflow
 
 
@@ -743,17 +896,29 @@ def build(name, src_path, floor=6.0):
         kill[pi] += "|" + "".join(m3._norm_txt(b["text"]) for b in rows)
         kill_drop[pi] += "|" + "".join(m3._norm_txt_drop(b["text"]) for b in rows)
     pdf = Pdf.open(src_path)
+    displaced_pages = {}
     for pi, page in enumerate(pdf.pages):
         if kill.get(pi):
+            dl = []
             m3.remove_text_by_content(
                 page, pdf, kill[pi], kill_blob_drop=kill_drop[pi],
                 keep_tokens=m3.keep_tokens_for(layout["pages"][pi], pi,
-                                               unit_for_block))
+                                               unit_for_block),
+                displaced=dl)
+            if dl:
+                displaced_pages[pi] = dl
     stripped = f"{OUT}/{name}_stripped.pdf"
     pdf.save(stripped); pdf.close()
 
     # 2) reflow (skip the mostly-untranslated pages so they stay original English)
     per_page, overflow = _reflow(layout, units, floor, skip_pages)
+    for pi, ds in m3.redraw_displaced(displaced_pages, layout).items():
+        for d in ds:
+            per_page.setdefault(pi, []).append({
+                "x": d["x"], "y_top": d["y_top"], "size": d["size"],
+                "font": "NotoJP", "line": d["text"],
+                "width": max(20.0, len(d["text"]) * d["size"]),
+                "justify": False, "color": tuple(d["color"])})
 
     placed = {}
     for pi, draws in per_page.items():

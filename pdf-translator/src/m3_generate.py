@@ -287,6 +287,33 @@ def _decode_op(op, cur_font, decoders):
     return "".join(out)
 
 
+def redraw_displaced(displaced_pages, layout):
+    """Draw specs for ops the advance-chain guard removed: each text is
+    matched to a KEPT (non-translatable) block on its page and redrawn at
+    that block's own position - identical digits/letters, correct spot."""
+    trans = {"body", "heading", "caption", "title", "label"}
+    out = {}
+    for pi, texts in displaced_pages.items():
+        blocks = layout["pages"][pi]["blocks"]
+        used = set()
+        for t in texts:
+            n = _norm_txt(t)
+            if not n:
+                continue
+            for bi, b in enumerate(blocks):
+                if bi in used or b["type"] in trans:
+                    continue
+                if _norm_txt(b["text"]) == n:
+                    used.add(bi)
+                    out.setdefault(pi, []).append({
+                        "x": b["x0"], "y_top": b["top"],
+                        "size": max(4.0, b.get("size") or 9.0),
+                        "text": t.strip(),
+                        "color": list(b.get("color") or (0, 0, 0))})
+                    break
+    return out
+
+
 def keep_tokens_for(p, pi, unit_for_block):
     """Normalized tokens of everything that STAYS on page pi (kept-type blocks
     and untranslated text) - the fragment sweep must never delete these."""
@@ -496,6 +523,32 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         run_len = (r - 1) - (l + 1) + 1   # count of consecutive frags l+1..r-1
         if prevd and nextd and run_len <= _MAX_FRAG_RUN:
             dropped[i]=True
+    # ADVANCE-CHAIN GUARD: inside one text object, a show op with NO
+    # repositioning (Tm/Td/TD/T*) since the previous show op is positioned by
+    # that op's GLYPH ADVANCE. Deleting the earlier op slides this op to the
+    # line start (a TOC page number jumping onto its title's x). Such a kept
+    # op is dropped too and reported via kwargs["displaced"] so the overlay
+    # can redraw it at its block's true position.
+    displaced = kwargs.get("displaced")
+    chain_dropped = False
+    for i, op in enumerate(ops):
+        o = str(op.operator)
+        if o in ("BT", "ET", "Tm", "Td", "TD", "T*"):
+            chain_dropped = False
+            continue
+        if not is_text[i]:
+            continue
+        if o in ("'", '"'):          # these start a new line themselves
+            chain_dropped = dropped[i]
+            continue
+        if dropped[i]:
+            chain_dropped = True
+        elif chain_dropped:
+            t = op_uni[i] if op_uni[i] is not None else _op_text(ops[i])
+            if t and t.strip():
+                dropped[i] = True
+                if displaced is not None:
+                    displaced.append(t)
     out=[op for i,op in enumerate(ops) if not dropped[i]]
     if depth == 0:
         stream_obj.Contents = owner.make_stream(unparse_content_stream(out))
@@ -996,13 +1049,24 @@ def generate(name, src_path):
 
     # 1) strip English in-place (content-based, coordinate-free)
     pdf=Pdf.open(src_path)
+    displaced_pages={}
     for pi,page in enumerate(pdf.pages):
         if kill_blob.get(pi):
+            dl=[]
             remove_text_by_content(page, pdf, kill_blob[pi],
                                    kill_blob_drop=kill_blob_drop[pi],
                                    keep_tokens=keep_tokens_for(
-                                       layout["pages"][pi], pi, unit_for_block))
+                                       layout["pages"][pi], pi, unit_for_block),
+                                   displaced=dl)
+            if dl:
+                displaced_pages[pi]=dl
     stripped=f"{OUT}/{name}_stripped.pdf"; pdf.save(stripped); pdf.close()
+    for pi, ds in redraw_displaced(displaced_pages, layout).items():
+        for d in ds:
+            per_page_draws[pi].append({"x": d["x"], "y_top": d["y_top"],
+                                       "size": d["size"], "font": "NotoJP",
+                                       "line": d["text"], "uid": None,
+                                       "color": d["color"]})
 
     # 2) overlay - flow each unit across its regions
     overlay=f"{OUT}/{name}_overlay.pdf"
