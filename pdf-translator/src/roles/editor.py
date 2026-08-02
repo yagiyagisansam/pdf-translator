@@ -219,7 +219,9 @@ def _flow_units_lshape(units, x0, width, y, y_bottom, ybands, boxes, factor,
     a band where a photo covers only part of the lane, lines are wrapped at
     the remaining width beside it (magazine wrap) instead of skipping the
     whole band - the fix for book pages whose text hugs the pictures.
-    Returns (draws, y_end, leftover_line_count)."""
+    `units` entries are units or (unit, remaining_text, need_anchor) tuples.
+    Returns (draws, y_end, rest) where rest carries the undrawn tail in the
+    same tuple form, ready to continue in another column."""
     draws = []
     lane_x1 = x0 + width
     min_w = max(80.0, 0.30 * width)
@@ -252,10 +254,13 @@ def _flow_units_lshape(units, x0, width, y, y_bottom, ybands, boxes, factor,
             return None, None, nb
         return best[0], best[1], None
 
-    leftover = 0
+    rest_out = []
     dead = False
-    for k, u in enumerate(units):
-        text = u.get("target")
+    for k, item in enumerate(units):
+        if isinstance(item, tuple):
+            u, text, need_anchor = item
+        else:
+            u, text, need_anchor = item, item.get("target"), True
         if not text:
             continue
         font = font_of(u)
@@ -263,15 +268,18 @@ def _flow_units_lshape(units, x0, width, y, y_bottom, ybands, boxes, factor,
         size = _unit_size(u, factor)
         lh = size * LR
         if dead:
-            leftover += len(m3._wrap(text, font, size, max(10.0, width)))
+            rest_out.append((u, text, need_anchor))
             continue
         if draws:
             gap = HEAD_GAP if u["type"] in ("heading", "title") else PARA_GAP
             y += lh * max(1, round(gap))
         # VERTICAL ANCHOR per unit: never start above the unit's own source
         # top - Japanese that ran short must not pull later sections upward
-        # (a TOC's sub-entries migrating above their own heading)
-        y = max(y, u.get("_top", y))
+        # (a TOC's sub-entries migrating above their own heading). A
+        # CONTINUATION (tail spilling into the next column) is exempt: it
+        # already anchored at its first placement.
+        if need_anchor:
+            y = max(y, u.get("_top", y))
         is_head = u["type"] in ("heading", "title")
         remaining = text
         while remaining:
@@ -282,8 +290,7 @@ def _flow_units_lshape(units, x0, width, y, y_bottom, ybands, boxes, factor,
                     break
                 y = hit[1]
             if y + lh > y_bottom + 0.1:
-                leftover += len(m3._wrap(remaining, font, size,
-                                         max(10.0, width)))
+                rest_out.append((u, remaining, False))
                 dead = True
                 break
             fx, fw, nb = free_at(y, lh)
@@ -299,7 +306,17 @@ def _flow_units_lshape(units, x0, width, y, y_bottom, ybands, boxes, factor,
                           "color": color})
             y += lh
             remaining = rest
-    return draws, y, leftover
+    return draws, y, rest_out
+
+
+def _rest_line_count(rest, width, factor, font_of):
+    """Line count of undrawn tails (for the overflow metric)."""
+    n = 0
+    for u, text, _ in rest:
+        if text:
+            n += len(m3._wrap(text, font_of(u), _unit_size(u, factor),
+                              max(10.0, width)))
+    return n
 
 
 def _capacity(y, y_bottom, bands, lh):
@@ -579,7 +596,9 @@ def _layout_page(page, page_units, factor, font_of):
                                            g["Lx1"] - g["Lx0"], y,
                                            g["bottom"], ybands, boxes,
                                            factor, font_of)
-            draws += d; overflow += rem; y += lh_page * PARA_GAP
+            draws += d; y += lh_page * PARA_GAP
+            overflow += _rest_line_count(rem, g["Lx1"] - g["Lx0"], factor,
+                                         font_of)
         else:
             # Newspaper-style balanced two-column flow: combine BOTH lanes in
             # reading order into one stream, fill the LEFT column top-to-bottom
@@ -600,7 +619,9 @@ def _layout_page(page, page_units, factor, font_of):
                 d, y, rem = _flow_units_lshape(units, col["x0"], w, y,
                                                g["bottom"], ybands, boxes,
                                                factor, font_of)
-                draws += d; overflow += rem; y = g["bottom"] + lh_page * PARA_GAP
+                draws += d; overflow += _rest_line_count(rem, w, factor,
+                                                         font_of)
+                y = g["bottom"] + lh_page * PARA_GAP
                 continue
             wL, wR = L["x1"] - L["x0"], R["x1"] - R["x0"]
             if min(wL, wR) / max(wL, wR) < 0.7:
@@ -621,35 +642,38 @@ def _layout_page(page, page_units, factor, font_of):
                         d, ly, rem = _flow_units_lshape(
                             [u], col["x0"], wl, ly, g["bottom"],
                             ybands, boxes, factor, font_of)
-                        draws += d; overflow += rem
+                        draws += d
+                        overflow += _rest_line_count(rem, wl, factor,
+                                                     font_of)
                         ly += _unit_size(u, factor) * LR * PARA_GAP
                     y = max(y, ly)
                 y += lh_page * PARA_GAP
                 continue
-            w = min(wL, wR)                # wrap to the narrower
-            lines = _unit_lines(units, factor, w, font_of)
-            Lbands = obs_for(L["x0"], L["x1"])
-            Rbands = obs_for(R["x0"], R["x1"])
-            Lcap = _capacity(y, g["bottom"], Lbands, lh_page)
-            Rcap = _capacity(y, g["bottom"], Rbands, lh_page)
-            # BALANCE: split by column capacity so both columns fill to roughly
-            # equal height, instead of packing the left column full and leaving
-            # the right empty. The right column may hold less (e.g. a table), so
-            # weight the split by each column's capacity.
-            total = len(lines)
-            if Lcap + Rcap > 0:
-                target_left = min(Lcap, round(total * Lcap / (Lcap + Rcap)))
-                if total - target_left > Rcap:      # push extra left if right can't hold it
-                    target_left = min(Lcap, total - Rcap)
-            else:
-                target_left = 0
-            d, yl, _ = _flow_column(lines[:target_left], L["x0"], w, y,
-                                    g["bottom"], Lbands)
-            draws += d
-            d, yr, rem = _flow_column(lines[target_left:], R["x0"], w, y,
-                                      g["bottom"], Rbands)
-            draws += d; overflow += len(rem)
-            y = max(yl, yr) + lh_page * PARA_GAP
+            # NEWSPAPER CONTINUATION with layout fidelity: fill the left
+            # column, spill the tail into the right column - but every unit
+            # ANCHORS at its own source top on first placement (a heading
+            # sourced below a table must never float above it, and body text
+            # must never climb into a top-right caption/margin zone), and
+            # both columns flow L-SHAPED around partial-width obstacles.
+            # Continuation tails are anchor-exempt (they anchored already).
+            ybL, bxL = _obstacle_geo(page, L["x0"], L["x1"], taken)
+            ybR, bxR = _obstacle_geo(page, R["x0"], R["x1"], taken)
+            queue = [(u, u.get("target"), True) for u in units
+                     if u.get("target")]
+            cur_y = y
+            y_end = y
+            for col, yb, bx in ((L, ybL, bxL), (R, ybR, bxR)):
+                if not queue:
+                    break
+                wl = col["x1"] - col["x0"]
+                d, cur_y, queue = _flow_units_lshape(
+                    queue, col["x0"], wl, cur_y, g["bottom"], yb, bx,
+                    factor, font_of)
+                draws += d
+                y_end = max(y_end, cur_y)
+                cur_y = g["top"]
+            overflow += _rest_line_count(queue, min(wL, wR), factor, font_of)
+            y = y_end + lh_page * PARA_GAP
     return draws, overflow
 
 
