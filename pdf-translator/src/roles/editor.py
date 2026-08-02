@@ -360,8 +360,13 @@ def _page_geom(page):
     # only: a margin artifact (a section number "3.1" in the left margin, a
     # side caption) must not widen the main flow to the page edge. Substantial
     # = at least 45% as wide as the widest translatable block.
-    wmax = max(b["x1"] - b["x0"] for b in trans)
-    main = [b for b in trans if (b["x1"] - b["x0"]) >= 0.45 * wmax] or trans
+    # prefer BODY paragraphs for the lane bounds: a display title starting at
+    # the page edge would stretch the lane over the margin-caption column and
+    # the captions would then flow as lane text instead of keeping their box
+    bodies = [b for b in trans if b["type"] == "body"]
+    base = bodies or trans
+    wmax = max(b["x1"] - b["x0"] for b in base)
+    main = [b for b in base if (b["x1"] - b["x0"]) >= 0.45 * wmax] or base
     Lx0 = min(b["x0"] for b in main); Lx1 = max(b["x1"] for b in main)
     top = min(b["top"] for b in trans)
     bottom = min(max(b["bottom"] for b in body), page["height"] * 0.94)
