@@ -1061,12 +1061,6 @@ def generate(name, src_path):
             if dl:
                 displaced_pages[pi]=dl
     stripped=f"{OUT}/{name}_stripped.pdf"; pdf.save(stripped); pdf.close()
-    for pi, ds in redraw_displaced(displaced_pages, layout).items():
-        for d in ds:
-            per_page_draws[pi].append({"x": d["x"], "y_top": d["y_top"],
-                                       "size": d["size"], "font": "NotoJP",
-                                       "line": d["text"], "uid": None,
-                                       "color": d["color"]})
 
     # 2) overlay - flow each unit across its regions
     overlay=f"{OUT}/{name}_overlay.pdf"
@@ -1084,6 +1078,12 @@ def generate(name, src_path):
             mb = page.mediabox
             page_sizes.append((float(mb.width), float(mb.height)))
     per_page_draws={pi:[] for pi in range(npages)}
+    for pi, ds in redraw_displaced(displaced_pages, layout).items():
+        for d in ds:
+            per_page_draws[pi].append({"x": d["x"], "y_top": d["y_top"],
+                                       "size": d["size"], "font": "NotoJP",
+                                       "line": d["text"], "uid": None,
+                                       "color": d["color"]})
     import statistics as _st
     for uid,(u,regs) in unit_regions.items():
         sizes=[]; nlines=0; colors=[]
