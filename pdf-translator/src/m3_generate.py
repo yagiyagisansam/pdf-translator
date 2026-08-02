@@ -504,16 +504,28 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
     text_idx=[i for i in range(len(ops)) if is_text[i]]
     pos={idx:k for k,idx in enumerate(text_idx)}
     # resolve deferred (ambiguous) drops by stream context: the PROSE copy of
-    # the phrase sits between other definitively-dropped prose ops; the KEPT
-    # (equation/cell) copy is surrounded by ops that stay. Undrop the kept
-    # copies.
+    # the phrase sits near other definitively-dropped prose ops; the KEPT
+    # (equation/cell) copy is surrounded by ops that stay. The scan skips up
+    # to 3 INSUBSTANTIAL ops (bullet markers, math glyphs that normalize
+    # empty) - a "• Social security..." bullet's true neighbour is the
+    # dropped paragraph before the marker, while an equation fragment is
+    # walled off from the dropped prose by its own run of symbol ops.
+    def _near_dropped(k, step):
+        hops = 0
+        m2 = k + step
+        while 0 <= m2 < len(text_idx) and hops < 3:
+            idxn = text_idx[m2]
+            tn_ = (op_uni[idxn] if op_uni[idxn] is not None
+                   else _op_text(ops[idxn]))
+            if len(_norm_txt(tn_)) >= 3:
+                return dropped[idxn] and not ambiguous[idxn]
+            hops += 1
+            m2 += step
+        return False
     for k, idx in enumerate(text_idx):
         if not ambiguous[idx] or not dropped[idx]:
             continue
-        pd = k-1 >= 0 and dropped[text_idx[k-1]] and not ambiguous[text_idx[k-1]]
-        nd = k+1 < len(text_idx) and dropped[text_idx[k+1]] \
-            and not ambiguous[text_idx[k+1]]
-        if not (pd or nd):
+        if not (_near_dropped(k, -1) or _near_dropped(k, +1)):
             dropped[idx] = False
 
     def _is_frag(idx):
