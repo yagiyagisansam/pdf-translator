@@ -1079,6 +1079,38 @@ def analyze_pdf(path, name, render=True):
         for b in blocks:
             zone = is_ref and (ref_head_top is None or b["top"] >= ref_head_top - 2)
             b["type"] = classify_block(b, body_size, pi, ph, zone)
+        # SIDE CAPTIONS: a NARROW block in SMALLER type sitting OUTSIDE the
+        # main text column (left/right margin) is a photo caption. Typing it
+        # `caption` matters beyond semantics: M2 must never chain a caption
+        # into the body flow (a margin caption gluing two pages' body text
+        # into one unit drags whole paragraphs into the caption column and
+        # leaves the body area blank).
+        # the MAIN column is defined by the BODY paragraphs (a display title
+        # can start at the page edge and would stretch the range over the
+        # margin captions); headings only serve as fallback
+        _tt = ("body", "heading", "caption", "title")
+        _bw_ = [b["x1"] - b["x0"] for b in blocks if b["type"] == "body"]
+        _tw = _bw_ or [b["x1"] - b["x0"] for b in blocks if b["type"] in _tt]
+        if _tw:
+            _wmax = max(_tw)
+            _src = "body" if _bw_ else None
+            _main = [b for b in blocks
+                     if (b["type"] == _src if _src else b["type"] in _tt)
+                     and (b["x1"] - b["x0"]) >= 0.45 * _wmax]
+            if _main:
+                _mx0 = min(b["x0"] for b in _main)
+                _mx1 = max(b["x1"] for b in _main)
+                for b in blocks:
+                    if b["type"] not in ("body", "heading"):
+                        continue
+                    bw = b["x1"] - b["x0"]
+                    if bw > 0.35 * max(_mx1 - _mx0, 1.0):
+                        continue
+                    if not b.get("size") or b["size"] > body_size * 0.85:
+                        continue
+                    ov = min(b["x1"], _mx1) - max(b["x0"], _mx0)
+                    if ov < 0.5 * bw:
+                        b["type"] = "caption"
         # A bibliography entry spans several lines but only the FIRST (numbered)
         # line matches REF_RE; the continuation lines fell through to "body" and got
         # translated. Once the numbered list has started it runs to the document end,
