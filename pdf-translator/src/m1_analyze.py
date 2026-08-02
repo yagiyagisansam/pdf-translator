@@ -717,6 +717,85 @@ def _typical_line_gap(lines):
     return statistics.median(gaps) if gaps else 4.0
 
 
+def ruled_table_zones(lines, rules):
+    """Bounding boxes of RULED TABLES: >=3 stacked horizontal rules sharing an
+    x-span, enclosing >=2 visual rows that hold 2+ side-by-side lines (the
+    table signature - a stack of section separators encloses prose and never
+    qualifies). Spec tables with prose-y cells ("2x diesel engines, 10
+    knots...") fail the numeric row-mate test, chain into the body flow and
+    the translation walks straight across the table; inside a zone EVERY line
+    seals into its own cell instead."""
+    if not rules:
+        return []
+    zones = []
+    # table row rules are often drawn as x-SEGMENTS (one piece per column
+    # group); merge same-y segments into one logical rule or every segment
+    # boundary breaks the chain
+    rs = []
+    for r in sorted(rules, key=lambda r: (r["top"], r["x0"])):
+        if rs and abs(r["top"] - rs[-1]["top"]) <= 2:
+            m = rs[-1]
+            m["x0"] = min(m["x0"], r["x0"]); m["x1"] = max(m["x1"], r["x1"])
+            m["bottom"] = max(m["bottom"], r["bottom"])
+        else:
+            rs.append(dict(r))
+
+    def _cells_between(a, b):
+        rows = {}
+        for l in lines:
+            if a["bottom"] - 1 <= l["top"] and l["bottom"] <= b["top"] + 1 and \
+                    l["x0"] >= min(a["x0"], b["x0"]) - 4 and \
+                    l["x1"] <= max(a["x1"], b["x1"]) + 4:
+                rows.setdefault(round(l["top"] / 6.0), []).append(l)
+        return any(len(v) >= 2 for v in rows.values())
+
+    def flush(grp):
+        # trim DECORATIVE edge rules (a heading's underline glued above the
+        # table's top border): an edge rule with no side-by-side row between
+        # it and its neighbour is not part of the grid - keeping it drags the
+        # zone's obstacle box up to the heading and evicts it from its spot
+        while len(grp) >= 3 and not _cells_between(grp[0], grp[1]):
+            grp = grp[1:]
+        while len(grp) >= 3 and not _cells_between(grp[-2], grp[-1]):
+            grp = grp[:-1]
+        if len(grp) < 3:
+            return
+        x0 = min(g["x0"] for g in grp); x1 = max(g["x1"] for g in grp)
+        top = min(g["top"] for g in grp); bot = max(g["bottom"] for g in grp)
+        rows = {}
+        for l in lines:
+            if l["top"] >= top - 2 and l["bottom"] <= bot + 2 and \
+                    l["x0"] >= x0 - 4 and l["x1"] <= x1 + 4:
+                rows.setdefault(round(l["top"] / 6.0), []).append(l)
+        if sum(1 for v in rows.values() if len(v) >= 2) >= 2:
+            zones.append((x0, top, x1, bot))
+
+    grp = []
+    for r in rs:
+        if grp:
+            p = grp[-1]
+            ov = min(r["x1"], p["x1"]) - max(r["x0"], p["x0"])
+            w = min(r["x1"] - r["x0"], p["x1"] - p["x0"]) or 1.0
+            # a strip between two rules that holds ONLY single-per-row lines
+            # is prose or a section heading between two ADJACENT tables -
+            # the zone must break there, or the heading gets sealed into the
+            # table and the whole page's flow is pushed below a mega-zone
+            strip = [l for l in lines
+                     if p["bottom"] - 1 <= l["top"] and l["bottom"] <= r["top"] + 1
+                     and l["x0"] >= min(p["x0"], r["x0"]) - 4
+                     and l["x1"] <= max(p["x1"], r["x1"]) + 4]
+            srows = {}
+            for l in strip:
+                srows.setdefault(round(l["top"] / 6.0), []).append(l)
+            prose_strip = bool(strip) and \
+                not any(len(v) >= 2 for v in srows.values())
+            if r["top"] - p["top"] > 110 or ov < 0.7 * w or prose_strip:
+                flush(grp); grp = []
+        grp.append(r)
+    flush(grp)
+    return zones
+
+
 def group_blocks(lines, mid, left, right, body_size, rules=()):
     """Build blocks in 2D: a line joins an open block only when it is vertically
     adjacent AND horizontally aligned with it (x-overlap or shared left edge) AND
@@ -807,28 +886,60 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
         return None
 
     _MARK_RE = re.compile(r"^(?:[•‣⁃▪●·∙–—-]|\d{1,2}[.)])\s+")
+    _NUMHEAD_RE = re.compile(r"^\d{1,2}(?:\.\d+)+[.)]?\s+")
 
     def _hang_cont(l, b):
         """l looks like the WRAPPED CONTINUATION of a list item: block b opens
         with a marker line, l carries no marker of its own, and l's left edge
         sits roughly one marker-width right of the item's edge (the classic
         hanging indent). Size similarity and vertical adjacency are already
-        enforced by the caller's other guards."""
+        enforced by the caller's other guards. A numbered section title
+        ("6.48. When the corresponding noun form ...") wraps the same way but
+        only joins with TIGHT leading - the split halves otherwise translate
+        separately and the two drawings overlap."""
         first = b["lines"][0]
-        if not _MARK_RE.match(first["text"]) or _MARK_RE.match(l["text"]):
+        if _MARK_RE.match(l["text"]) or _NUMHEAD_RE.match(l["text"]):
             return False
         sz = l["size"] or b["size_med"] or 10.0
         dx = l["x0"] - first["x0"]
-        return 0.35 * sz <= dx <= 3.0 * sz
+        if _MARK_RE.match(first["text"]):
+            return 0.35 * sz <= dx <= 3.0 * sz
+        if _NUMHEAD_RE.match(first["text"]):
+            gap = l["top"] - b["bottom"]
+            if not (0.35 * sz <= dx <= 3.6 * sz and gap <= 0.45 * sz):
+                return False
+            # never merge under a TORN row (a row-mate segment split off by
+            # an alignment edge): inserting the wrap line between the torn
+            # halves reorders the block text against the content stream and
+            # the removal stops matching (residual English under the JP)
+            fh = (first["bottom"] - first["top"]) or 1.0
+            return not any(
+                m is not first and m is not l
+                and min(first["bottom"], m["bottom"]) -
+                    max(first["top"], m["top"]) >= 0.5 * fh
+                and m["x0"] >= first["x1"] - 2
+                for m in ls)
+        return False
 
     # a DOT-LEADER line (TOC row "Title . . . . 1-1-12") is one row of a
     # leadered list even when the leader glues the title and the page number
     # into a single segment - sealing it keeps rows from chaining into one
     # run-on paragraph of dots
     _leader = re.compile(r"(?:[.·⋅]\s*){5,}")
+    _tzones = ruled_table_zones(ls, rules)
+
+    def _in_table_zone(l):
+        return any(zx0 - 4 <= l["x0"] and l["x1"] <= zx1 + 6 and
+                   zt - 2 <= l["top"] and l["bottom"] <= zb + 2
+                   for (zx0, zt, zx1, zb) in _tzones)
+
     record_rows, list_rows, math_rows = set(), set(), []
+    zone_rows = set()
     for l in ls:
         why = _is_record_row(l)
+        if _in_table_zone(l):
+            record_rows.add(id(l))
+            zone_rows.add(id(l))
         if why or _is_contact_line(l["text"]) or _leader.search(l["text"]):
             record_rows.add(id(l))
         if why == "list":
@@ -939,7 +1050,8 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             blk = {"lines": [l], "x0": l["x0"], "x1": l["x1"],
                    "top": l["top"], "bottom": l["bottom"],
                    "size_med": l["size"], "record": id(l) in record_rows,
-                   "list": id(l) in list_rows}
+                   "list": id(l) in list_rows,
+                   "cell": id(l) in zone_rows}
             # a record row (TOC/table row) is sealed: one line = one block,
             # nothing may attach to it
             (done if id(l) in record_rows else open_blocks).append(blk)
@@ -980,7 +1092,19 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
                 # ONLY tight in-cell stacks: separate table/TOC rows have a
                 # visible row gap (>=~0.5 line height) and are usually wide -
                 # merging them would undo the row sealing entirely
+                # a row-separator RULE between the two stacks marks a ROW
+                # boundary: never merge across it (a dense spec table's row
+                # gap can be tighter than a header cell's line pitch, and the
+                # whole column collapsed into one crammed mega-cell)
+                _lo = min(a["bottom"], c["bottom"])
+                _hi = max(a["top"], c["top"])
+                _xlo = max(a["x0"], c["x0"]); _xhi = min(a["x1"], c["x1"])
+                rule_between = any(
+                    _lo - 1 <= (r["top"] + r["bottom"]) / 2 <= _hi + 1 and
+                    min(r["x1"], _xhi) - max(r["x0"], _xlo) > 4
+                    for r in rules)
                 if ov >= 0.7 * wmin and gap <= 0.4 * lh and \
+                        not rule_between and \
                         wmax <= 0.3 * page_text_w and \
                         max(s1, s2) / max(0.1, min(s1, s2)) <= 1.25:
                     a["lines"] += c["lines"]
@@ -999,6 +1123,8 @@ def group_blocks(lines, mid, left, right, body_size, rules=()):
             blk["record"] = True
         if b.get("list"):
             blk["list"] = True
+        if b.get("cell"):
+            blk["cell"] = True
         blocks.append(blk)
     return blocks
 
@@ -1496,6 +1622,7 @@ def analyze_pdf(path, name, render=True):
             "top_off": 0.0,
             "columns": 2 if mid else 1, "body_size": body_size,
             "blocks": ordered, "figures": figs, "rules": rules,
+            "table_zones": [list(z) for z in ruled_table_zones(lines, rules)],
         })
         # MEMORY: pdfplumber caches every page's parsed objects for the life of
         # the document - on a dense 200k+ char PDF that alone exceeds a small

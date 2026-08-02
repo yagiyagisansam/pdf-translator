@@ -194,6 +194,12 @@ def _obstacle_geo(page, x0, x1, taken):
         if _overlaps(x0, x1, f["x0"], f["x1"]):
             boxes.append((f["x0"] - 4, f["x1"] + 4, f["top"] - 4,
                           f["bottom"] + 4))
+    # a RULED TABLE is one solid obstacle: its cell translations are drawn in
+    # their own boxes, and lane text must never drip into the gaps between
+    # its row rules (the same failure as a chart's gridlines)
+    for (zx0, zt, zx1, zb) in page.get("table_zones", []):
+        if _overlaps(x0, x1, zx0, zx1):
+            boxes.append((zx0 - 2, zx1 + 2, zt - 2, zb + 2))
     for b in page["blocks"]:
         if (b["type"] in KEPT or b.get("_keep_en")) and \
                 _overlaps(x0, x1, b["x0"], b["x1"]):
@@ -432,8 +438,24 @@ def _flow_in_own_box(u, factor, page, taken, font_of):
                 right = min(right, f["x0"] - 2)
         width = max(12.0, right - x0)
         max_lines = max(1, u.get("_nlines", 1))
-        while size > 4.5 and \
-                len(m3._wrap(u["target"], font, size, width)) > max_lines:
+        # RULE CLAMP: the row's separator rule sits right below the cell - a
+        # Japanese header that wraps a hair taller than the source strikes
+        # through it ("価格/ミックス" crossing the header underline). Shrink
+        # until the wrapped height stays above the nearest rule below.
+        avail_h = None
+        for r in page.get("rules", []):
+            if r["top"] > u["_top"] + 2 and \
+                    min(x1, r["x1"]) - max(x0, r["x0"]) > 4:
+                h = r["top"] - 1.0 - u["_top"]
+                if avail_h is None or h < avail_h:
+                    avail_h = h
+        if avail_h is not None and avail_h > max_lines * size * LR * 2.0:
+            avail_h = None          # roomy row - nothing to fight
+        while size > 4.5 and (
+                len(m3._wrap(u["target"], font, size, width)) > max_lines
+                or (avail_h is not None and
+                    len(m3._wrap(u["target"], font, size, width))
+                    * size * LR > avail_h + 1.5)):
             size -= 0.25
         lines = m3._wrap(u["target"], font, size, width)
         draws = []
