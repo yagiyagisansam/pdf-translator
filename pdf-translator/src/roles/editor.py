@@ -904,6 +904,8 @@ def build(name, src_path, floor=6.0):
                 page, pdf, kill[pi], kill_blob_drop=kill_drop[pi],
                 keep_tokens=m3.keep_tokens_for(layout["pages"][pi], pi,
                                                unit_for_block),
+                keep_blob=m3.keep_blob_for(layout["pages"][pi], pi,
+                                           unit_for_block),
                 displaced=dl)
             if dl:
                 displaced_pages[pi] = dl

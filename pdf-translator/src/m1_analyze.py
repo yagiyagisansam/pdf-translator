@@ -1252,6 +1252,18 @@ def analyze_pdf(path, name, render=True):
         # would otherwise poison every following page as "reference" (untranslated).
         if (is_ref or ref_started) and pi >= npages * 0.5:
             NUM_RE = re.compile(r"^\[?\d+[.\]]")
+            # the bibliography ENDS when a page shows no evidence of it: not
+            # one strict bibliographic entry ("N. Surname, I." / "[N] I.
+            # Surname") on the whole page. Reports often place appendices
+            # AFTER the references - sticky propagation must not swallow them
+            # ("Appendix A" prose or an acronym glossary typed reference =
+            # whole chapters left untranslated). A numbered appendix heading
+            # ("6. Appendix B: ...") is NOT evidence, hence BIB_RE, not NUM_RE.
+            if not is_ref and not any(BIB_RE.match(b["text"].strip())
+                                      for b in blocks):
+                ref_started = False
+        if (is_ref or ref_started) and pi >= npages * 0.5:
+            NUM_RE = re.compile(r"^\[?\d+[.\]]")
             for col in sorted({b.get("col", 0) for b in blocks}):
                 cb = sorted((b for b in blocks if b.get("col", 0) == col),
                             key=lambda b: b["top"])
@@ -1336,6 +1348,53 @@ def analyze_pdf(path, name, render=True):
                 figs.append({"type": "figure", "col": 0, "vector": True,
                              "x0": bx[0], "x1": bx[2], "top": bx[1],
                              "bottom": bx[3], "text": "", "order": None})
+        # CHART PLOT BOX: a sparse scatter/line chart never clusters - its
+        # markers sit tens of points apart - but virtually every chart draws
+        # a plot FRAME rect. A large rect containing many small FILLED marks
+        # (data points, bar slivers) is a chart: register it as a vector
+        # figure or the reflow pours body text into the gaps between its
+        # gridlines. Stroked-only small rects (form checkboxes) don't count
+        # as marks, so forms stay untouched.
+        _prims = list(page.rects or []) + list(page.curves or [])
+        small_marks = [s for s in _prims
+                       if (s["x1"] - s["x0"]) <= 8.0
+                       and (s["bottom"] - s["top"]) <= 8.0
+                       and s.get("fill")]
+        if len(small_marks) >= 8:
+            big_rects = sorted(
+                (r for r in (page.rects or [])
+                 if (r["x1"] - r["x0"]) >= 100 and (r["bottom"] - r["top"]) >= 60
+                 and (r["x1"] - r["x0"]) * (r["bottom"] - r["top"]) <= 0.8 * pw * ph),
+                key=lambda r: -((r["x1"] - r["x0"]) * (r["bottom"] - r["top"])))
+            for r in big_rects:
+                inside = sum(1 for s in small_marks
+                             if s["x0"] >= r["x0"] - 2 and s["x1"] <= r["x1"] + 2
+                             and s["top"] >= r["top"] - 2
+                             and s["bottom"] <= r["bottom"] + 2)
+                if inside < 8:
+                    continue
+                if any(f["x0"] <= r["x0"] + 2 and f["x1"] >= r["x1"] - 2 and
+                       f["top"] <= r["top"] + 2 and f["bottom"] >= r["bottom"] - 2
+                       for f in figs):
+                    continue    # already covered by a registered figure
+                # decorated-panel guard: a big rect enclosing flowing prose is
+                # a callout box, not a chart
+                decorated = False
+                for b in blocks:
+                    ba = max(0.0, (b["x1"] - b["x0"])) * \
+                        max(0.0, (b["bottom"] - b["top"]))
+                    ix = max(0.0, min(b["x1"], r["x1"]) - max(b["x0"], r["x0"]))
+                    iy = max(0.0, min(b["bottom"], r["bottom"]) - max(b["top"], r["top"]))
+                    if ba and ix * iy >= 0.7 * ba and \
+                            b.get("nlines", 1) >= 3 and \
+                            (b.get("size") or 0) >= body_size * 0.9:
+                        decorated = True
+                        break
+                if decorated:
+                    continue
+                figs.append({"type": "figure", "col": 0, "vector": True,
+                             "x0": r["x0"], "x1": r["x1"], "top": r["top"],
+                             "bottom": r["bottom"], "text": "", "order": None})
             # small text sitting inside a vector diagram is figure content.
             # SHORT WORD LABELS (a bubble-chart circle's caption, a legend
             # entry) become `label`: translated and drawn strictly IN PLACE

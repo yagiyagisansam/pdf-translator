@@ -329,6 +329,22 @@ def keep_tokens_for(p, pi, unit_for_block):
     return toks
 
 
+def keep_blob_for(p, pi, unit_for_block):
+    """Joined normalized text of each kept block on page pi. Equation and
+    table ops are split FINER than whitespace tokens ("π"+"(context"+")"), so
+    the sweep also needs a substring-level notion of 'this belongs to a kept
+    block'."""
+    trans = {"body", "heading", "caption", "title", "label"}
+    blobs = []
+    for bi, b in enumerate(p["blocks"]):
+        if b["type"] in trans and f"{pi}:{bi}" in unit_for_block:
+            continue
+        n = _norm_txt(b.get("text", ""))
+        if len(n) >= 2:
+            blobs.append(n)
+    return tuple(blobs)
+
+
 def _form_xobjects(res, seen):
     """Form XObjects reachable from a Resources dict (one level's worth)."""
     out = []
@@ -371,12 +387,22 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                   parent_decoders=None):
     blob_drop = kwargs.get("kill_blob_drop")
     blob_nodigit = _DIGIT_RE.sub("", kill_blob)
+    keep_tokens = kwargs.get("keep_tokens") or frozenset()
+    keep_blob = kwargs.get("keep_blob") or ()
+
+    def _in_keep_blob(n):
+        return any(n in kb for kb in keep_blob)
     # an XObject may inherit fonts from its parent's Resources
     decoders = dict(parent_decoders or {})
     decoders.update(_page_font_decoders(res_owner))
     ops = list(parse_content_stream(stream_obj))
     is_text=[False]*len(ops); dropped=[False]*len(ops)
     op_uni=[None]*len(ops)   # decoded Unicode text per text op (for the frag pass)
+    # ops whose text lives in a KEPT block AND in the kill blob (a display
+    # equation whose phrase is repeated as inline math in the translated
+    # prose): content alone cannot tell the copies apart, so the drop is
+    # DEFERRED and resolved by stream context below
+    ambiguous=[False]*len(ops)
     cur_font=None
     for i,op in enumerate(ops):
         o=str(op.operator)
@@ -393,6 +419,10 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                              blob_drop, _norm_txt_drop(t),
                              blob_nodigit=blob_nodigit):
                 dropped[i]=True
+                _n=_norm_txt(t)
+                if _n and (len(_n) >= 2 or ord(_n[0]) > 127) \
+                        and _in_keep_blob(_n):
+                    ambiguous[i]=True
             # a PURE LIGATURE op ('ﬂ' of "...triﬂuoro..." drawn as its own
             # op) normalizes to 2 chars - under the >=3 guard - and survives
             # as a stray fragment over the Japanese. The raw glyph may be the
@@ -405,6 +435,18 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                 dropped[i]=True
     text_idx=[i for i in range(len(ops)) if is_text[i]]
     pos={idx:k for k,idx in enumerate(text_idx)}
+    # resolve deferred (ambiguous) drops by stream context: the PROSE copy of
+    # the phrase sits between other definitively-dropped prose ops; the KEPT
+    # (equation/cell) copy is surrounded by ops that stay. Undrop the kept
+    # copies.
+    for k, idx in enumerate(text_idx):
+        if not ambiguous[idx] or not dropped[idx]:
+            continue
+        pd = k-1 >= 0 and dropped[text_idx[k-1]] and not ambiguous[text_idx[k-1]]
+        nd = k+1 < len(text_idx) and dropped[text_idx[k+1]] \
+            and not ambiguous[text_idx[k+1]]
+        if not (pd or nd):
+            dropped[idx] = False
 
     def _is_frag(idx):
         """A short stray fragment: <=3 normalized chars, or matches _FRAG_RE
@@ -415,7 +457,6 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         norm=_norm_txt(raw)
         return len(norm)<=3 or bool(_FRAG_RE.match(raw_sep))
 
-    keep_tokens = kwargs.get("keep_tokens") or frozenset()
     # CHAR-RUN SWEEP: a line drawn as PER-CHARACTER ops (tracked/justified
     # microtypography) is invisible to the per-op matcher (every op is one
     # letter) and longer than the bounded fragment sweep allows - it survived
@@ -461,6 +502,17 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
                     last_ok = re_
                 re_ += 1
             if last_ok is not None:
+                # a matched window that is ITSELF a phrase of a KEPT block is
+                # a display equation / kept cell whose text coincidentally
+                # also appears inside a translated paragraph (inline math
+                # repeating the display formula: "π(context)"). The prose
+                # copy never matches this way - its window keeps extending
+                # through the surrounding sentence - so a window fully inside
+                # the keep blob is the kept copy: leave it on the page.
+                seg = _norm_txt("".join(texts[m2] for m2 in range(rp, last_ok + 1)))
+                if seg and _in_keep_blob(seg):
+                    rp = last_ok + 1
+                    continue
                 for m2 in range(rp, last_ok + 1):
                     idx = run[m2]
                     raw = texts[m2].strip()
@@ -479,6 +531,15 @@ def _strip_stream(stream_obj, res_owner, owner, kill_blob, kwargs, seen, depth=0
         # dropped text ops, but they must survive on the page
         raw_i=(op_uni[i] if op_uni[i] is not None else _op_text(ops[i])).strip()
         if raw_i and _norm_txt(raw_i) in keep_tokens:
+            continue
+        # sub-token pieces of a kept equation ("log", "(context", a lone Σ):
+        # ops are split finer than whitespace tokens, so exact-token
+        # protection misses them. Protect >=2-char pieces found inside a
+        # kept block's joined text, and single NON-ASCII glyphs (math
+        # symbols) likewise - single ASCII letters stay sweepable (they are
+        # the classic torn-tail fragments the sweep exists for).
+        _ni = _norm_txt(raw_i)
+        if _ni and (len(_ni) >= 2 or ord(_ni[0]) > 127) and _in_keep_blob(_ni):
             continue
         k=pos[i]
         # SEAM TAIL/HEAD: the op is the torn end of a word whose main op was
@@ -1056,6 +1117,8 @@ def generate(name, src_path):
             remove_text_by_content(page, pdf, kill_blob[pi],
                                    kill_blob_drop=kill_blob_drop[pi],
                                    keep_tokens=keep_tokens_for(
+                                       layout["pages"][pi], pi, unit_for_block),
+                                   keep_blob=keep_blob_for(
                                        layout["pages"][pi], pi, unit_for_block),
                                    displaced=dl)
             if dl:
